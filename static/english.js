@@ -1,29 +1,34 @@
  'use strict';
 // Shared platform login; API credentials never enter this file or browser storage.
-let englishSession=null,englishData=null,englishCall=null,englishEpoch=0,englishMicDevice='',englishPersonRole='partner',englishPersonVoice='';
+let englishSession=null,englishData=null,englishCall=null,englishEpoch=0,englishMicDevice='',englishPersonRole='partner',englishPersonVoice='',englishLastCall=null,englishHistoryBefore=0;
 const englishDate=x=>x?new Date(typeof x==='number'?x*1000:x).toLocaleString():'尚未同步';
 function englishStatus(text){const el=$('#englishLiveStatus');if(el)el.textContent=text}
+async function englishPrepareLogout(){const call=englishCall||englishLastCall;englishCleanup();if(call){try{await englishFlushRecords(call)}catch{toast('部分文字未保存，退出后可能无法补回')}}}
+function englishForgetRecords(){englishCleanup();englishLastCall=null;englishSession=null;englishData=null}
 function englishCleanup(){
  englishEpoch++;
  const call=englishCall;englishCall=null;
  if(!call)return;
+ englishFlushKeepalive(call);
  call.closed=true;clearInterval(call.timer);clearTimeout(call.timeout);call.abort?.abort();
  call.stream?.getTracks().forEach(t=>t.stop());
  call.pc?.close();call.audio?.pause();if(call.audio)call.audio.srcObject=null;
  // Close even during SDP exchange; backend rejects a connection that was cancelled.
- fetch('/api/english/realtime/'+call.sid+'/close',{method:'POST',credentials:'same-origin',keepalive:true,headers:{'X-App-Request':'1'}}).catch(()=>{});
+ fetch('/api/english/realtime/'+call.sid+'/close',{method:'POST',credentials:'same-origin',keepalive:true,headers:{'X-App-Request':'1','Content-Type':'application/json'},body:JSON.stringify({record_issue:!!call.recordIssue})}).catch(()=>{});
 }
 if(typeof window!=='undefined'){
  window.addEventListener?.('pagehide',englishCleanup);
  window.addEventListener?.('pageshow',()=>{if(englishCall&&Date.now()>englishCall.expires)englishStopCall('本次练习时间已到')});
 }
-async function englishStopCall(message='本次练习已结束'){
+async function englishStopCall(message='本次练习已结束',drain=false){
  const call=englishCall;
+ if(call?.finishing)return;if(call)call.finishing=true;
+ if(drain&&call){call.track&&(call.track.enabled=false);englishStatus('正在保存最后一句…');await new Promise(resolve=>setTimeout(resolve,1400));if(englishCall!==call)return}
  englishCleanup();englishStatus(message);
  const start=$('#englishStartCall');if(start){start.disabled=true;start.textContent='通话已结束'}
  const end=$('#englishStopCall');if(end)end.disabled=true;
  const mute=$('#englishMute');if(mute)mute.disabled=true;const guide=$('#englishGuide');if(guide)guide.disabled=true;
- if(call){try{await call.queue;await api('/english/realtime/'+call.sid+'/close','POST')}catch{toast('对话记录未完全保存，请稍后查看对话记录')}}
+ if(call){try{await englishFlushRecords(call);await api('/english/realtime/'+call.sid+'/close','POST',{record_issue:!!call.recordIssue});if(page==='englishChat'&&englishSession?.id===call.sid){const updated=await api('/english/sessions/'+call.sid);const box=$('#englishAssessment');if(box){box.innerHTML=englishAssessmentHtml(updated);englishBindAssessment(updated)}}}catch{toast('部分对话文字尚未保存；请保持页面并点击重试保存')}}
 }
 async function englishMicrophones(){
  if(!navigator.mediaDevices?.enumerateDevices)return;
@@ -31,16 +36,57 @@ async function englishMicrophones(){
  select.innerHTML='<option value="">系统默认麦克风</option>'+rows.filter(d=>d.kind==='audioinput'&&d.deviceId).map((d,i)=>`<option value="${esc(d.deviceId)}">${esc(d.label||'麦克风 '+(i+1))}</option>`).join('');select.value=englishMicDevice;
  }catch{}
 }
-function englishCaption(call,role,id,text,done=false){
- if(!text)return;
- const key=role+':'+id;let item=call.captions.get(key);
- if(!item){item={role,text:''};call.captions.set(key,item)}
- item.text=done?text:item.text+text;
- const transcript=$('#englishCaptions');if(transcript){transcript.innerHTML=Array.from(call.captions.values()).slice(-40).map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('');transcript.scrollTop=transcript.scrollHeight}
- if(done&&!call.saved.has(key)){
-  call.saved.add(key);
-  call.queue=call.queue.then(()=>api('/english/realtime/'+call.sid+'/transcript','POST',{item_id:String(id).slice(0,150),role,text:text.slice(0,4000)})).catch(()=>{const note=$('#englishSaveNote');if(note)note.textContent='部分对话文字未保存；语音通话仍可继续。'});
+function englishRecordStatus(call){
+ if(englishCall&&englishCall!==call)return;
+ if(page!=='englishChat'||englishSession?.id!==call.sid)return;
+ const note=$('#englishSaveNote');if(!note)return;
+ const items=Array.from(call.captions?.values()||[]),pending=items.filter(x=>x.text&&x.sequence>(x.ack||0));
+ note.textContent=pending.some(x=>x.failed)?'部分文字保存失败，请点“重试保存”；不要立即关闭页面。':pending.length?'正在保存对话文字…':'已保存 '+items.filter(x=>x.ack).length+' 条文字记录';
+ const retry=$('#englishRetrySave');if(call.recordIssue)note.textContent+=' 有学生语音转写失败，记录可能不完整，需教师核查。';
+ if(retry)retry.hidden=!pending.some(x=>x.failed);
+}
+function englishSaveItem(call,key){
+ const item=call.captions.get(key);if(!item?.text||item.sequence<=(item.ack||0))return call.queue||Promise.resolve();
+ clearTimeout(item.timer);
+ const payload={item_id:item.id,role:item.role,text:item.text.slice(0,4000),final:!!item.final,sequence:item.sequence};
+ call.queue=(call.queue||Promise.resolve()).catch(()=>{}).then(()=>api('/english/realtime/'+call.sid+'/transcript','POST',payload)).then(()=>{
+  item.ack=Math.max(item.ack||0,payload.sequence);item.failed=false;item.failures=0;call.saved?.add(key);englishRecordStatus(call);
+ }).catch(()=>{
+  item.failed=true;item.failures=(item.failures||0)+1;englishRecordStatus(call);
+  if(!call.closed&&item.failures<=2)item.timer=setTimeout(()=>englishSaveItem(call,key),item.failures*1000);
+ });
+ englishRecordStatus(call);return call.queue;
+}
+async function englishFlushRecords(call){
+ for(const [key,item] of call.captions||[]){clearTimeout(item.timer);if(item.text&&item.sequence>(item.ack||0))englishSaveItem(call,key)}
+ await call.queue;
+ if(Array.from(call.captions?.values()||[]).some(i=>i.text&&i.sequence>(i.ack||0)))throw Error('部分文字尚未保存');
+}
+function englishFlushKeepalive(call){
+ for(const item of call.captions?.values()||[]){
+  clearTimeout(item.timer);
+  if(!item.text||item.sequence<=(item.ack||0))continue;
+  fetch('/api/english/realtime/'+call.sid+'/transcript',{method:'POST',credentials:'same-origin',keepalive:true,headers:{'X-App-Request':'1','Content-Type':'application/json'},body:JSON.stringify({item_id:item.id,role:item.role,text:item.text.slice(0,4000),final:!!item.final,sequence:item.sequence})}).catch(()=>{});
  }
+}
+function englishCaption(call,role,id,text,done=false,replace=false){
+ if(!text)return;
+ const actualId=String(id||call.currentItem?.[role]||('local_'+role+'_'+Date.now()+'_'+Math.random().toString(36).slice(2))).slice(0,512);
+ if(!call.currentItem)call.currentItem={};call.currentItem[role]=actualId;
+ const key=role+':'+actualId;let item=call.captions.get(key);
+ if(!item){item={role,id:actualId,text:'',sequence:0,ack:0,final:false};call.captions.set(key,item)}
+ const next=(done||replace)?text:item.text+text;
+ if(item.final&&!done)return;
+ if(item.text===next&&item.final===done)return;
+ item.text=next;item.final=done;item.sequence++;
+ const transcript=$('#englishCaptions');if(transcript){transcript.innerHTML=Array.from(call.captions.values()).slice(-120).map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}${t.final?'':' <small>（转写中）</small>'}</p>`).join('');transcript.scrollTop=transcript.scrollHeight}
+ if(done){delete call.currentItem[role];englishSaveItem(call,key)}
+ else if(!item.timer)item.timer=setTimeout(()=>{item.timer=null;englishSaveItem(call,key)},800);
+}
+function englishCaptureItem(call,item,final=true){
+ if(!item||item.type!=='message'||!['user','assistant'].includes(item.role))return;
+ const text=(item.content||[]).map(c=>c.transcript||c.text||'').filter(Boolean).join(' ');
+ if(text)englishCaption(call,item.role==='user'?'student':'assistant',item.id,text,final,true);
 }
 function englishSafeDiagnostic(value){
  return String(value??'').slice(0,4000)
@@ -58,7 +104,7 @@ function englishSend(call,event){
 }
 function englishGuideAvailability(call){
  const button=$('#englishGuide');
- if(button)button.disabled=!call?.ready||!!(call.responding||call.speaking||call.awaitingResponse||call.openingPending||call.guidePending||call.closed);
+ if(button)button.disabled=!call?.ready||!!(call.responding||call.speaking||call.awaitingResponse||call.openingPending||call.guidePending||call.finishing||call.closed);
 }
 function englishGuideCall(){
  const call=englishCall;
@@ -107,13 +153,17 @@ function englishEvent(call,event,channel){
  }else if(data.type==='input_audio_buffer.speech_stopped'){call.speaking=false;call.awaitingResponse=true;englishGuideAvailability(call);englishStatus('正在回应…')}
  else if(data.type==='response.created'){call.openingPending=false;call.guidePending=false;call.awaitingResponse=false;call.responding=true;englishGuideAvailability(call);englishStatus('AI 正在说，可以直接插话')}
  else if(data.type==='response.done'){
+  for(const item of data.response?.output||[])englishCaptureItem(call,item,true);
   call.responding=false;call.awaitingResponse=false;call.guidePending=false;englishGuideAvailability(call);
   if(data.response?.status==='failed'){englishLiveFailure(call,data.response.status_details?.error||{code:'response_failed'},'response.done');return}
   englishStatus(data.response?.status==='cancelled'?'正在听你说…':'轮到你了，慢慢说');
  }
+ else if(data.type==='conversation.item.input_audio_transcription.delta')englishCaption(call,'student',data.item_id,(data.text||'')+(data.stash||''),false,true);
  else if(data.type==='conversation.item.input_audio_transcription.completed')englishCaption(call,'student',data.item_id||data.event_id,data.transcript||data.text,true);
- else if(data.type==='response.audio_transcript.delta')englishCaption(call,'assistant',data.item_id||data.response_id,data.delta);
- else if(data.type==='response.audio_transcript.done')englishCaption(call,'assistant',data.item_id||data.response_id,data.transcript||data.text,true);
+ else if(data.type==='conversation.item.input_audio_transcription.failed'){call.recordIssue=true;const note=$('#englishSaveNote');if(note)note.textContent='本轮学生语音未能转写，无法据此评分；请重新说一句。'}
+ else if(['response.audio_transcript.delta','response.output_audio_transcript.delta','response.text.delta','response.output_text.delta'].includes(data.type))englishCaption(call,'assistant',data.item_id||data.response_id,data.delta);
+ else if(['response.audio_transcript.done','response.output_audio_transcript.done','response.text.done','response.output_text.done'].includes(data.type))englishCaption(call,'assistant',data.item_id||data.response_id,data.transcript||data.text,true);
+ else if(['response.output_item.done','conversation.item.created'].includes(data.type))englishCaptureItem(call,data.item,data.item?.status==='completed'||data.type==='response.output_item.done');
  else if(data.type==='error')englishLiveFailure(call,data.error||data);
 }
 async function englishIce(pc,call){
@@ -129,8 +179,11 @@ async function englishIce(pc,call){
 async function englishStartCall(){
  if(englishCall)return;
  const epoch=++englishEpoch,sid=englishSession.id;
+ if(englishLastCall?.owner!==user?.id)englishLastCall=null;
+ if(englishLastCall)await englishFlushRecords(englishLastCall);
+ if(epoch!==englishEpoch||page!=='englishChat')return;
  const selectedRole=$('#englishPersonRole')?.value||'partner',selectedVoice=$('#englishPersonVoice')?.value||'';
- const call={sid,closed:false,queue:Promise.resolve(),captions:new Map(),saved:new Set(),abort:new AbortController(),expires:Infinity};englishCall=call;
+ const call={sid,owner:user?.id,closed:false,queue:Promise.resolve(),captions:new Map(),saved:new Set(),abort:new AbortController(),expires:Infinity};englishCall=call;englishLastCall=call;
  const button=$('#englishStartCall');button.disabled=true;englishStatus('正在连接麦克风…');$('#englishStopCall').disabled=false;
  try{
   const stream=await navigator.mediaDevices.getUserMedia({audio:{...(englishMicDevice?{deviceId:{exact:englishMicDevice}}:{}),echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
@@ -183,13 +236,14 @@ views.englishChat=async()=>{
  return {html:heading(esc(s.topic.title),'不用找话题，AI 带你聊；回答一两句也可以。','<button id="englishBack">← 换个话题</button>')+
  `<section class="card english-call"><div class="english-voice-orb" aria-hidden="true">En</div><h2 id="englishLiveStatus" role="status">${usable?'准备好了，就开始吧':'本次练习记录'}</h2><p class="muted">${usable?'AI 先开口 · 可以随时插话':'选择一个话题，开始新的语音练习'}</p><span id="englishClock" class="english-clock"></span><audio id="englishRemoteAudio" autoplay></audio><button id="englishPlayAudio" hidden>播放 AI 声音</button>`+
  (usable?`<div class="english-person-options"><label>对话人员<select id="englishPersonRole">${Object.entries(options.roles).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonRole?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>声音<select id="englishPersonVoice"><option value="">教师默认音色</option>${Object.entries(options.voices).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonVoice?'selected':''}>${esc(label)}</option>`).join('')}</select></label></div><p class="small muted">默认练英语，也可要求练习其他外语；中文仅用于简短词义或语法解释。</p><div class="english-call-actions"><button class="primary" id="englishStartCall">开始对话</button><button id="englishMute" disabled>静音</button><button id="englishStopCall" disabled>结束</button><button id="englishGuide" disabled>带我聊</button><button id="englishHint">给我提示</button></div><p id="englishHintText" class="small" hidden></p><details class="english-device"><summary>麦克风设置</summary><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label></details><p id="englishMicNote" class="small warning"></p>`:'<button id="englishNewTopic">选择话题</button>')+
- `<details class="english-transcript"><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('')}</div></details><p id="englishSaveNote" class="small muted"></p><pre id="englishDiagnostic" class="english-diagnostic" hidden></pre><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
+ `<details class="english-transcript" ${usable?'':'open'}><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}${t.details?.final===false?' <small>（未完成转写）</small>':''}</p>`).join('')||'<p class="muted">暂无已保存文字。若旧版未收到或保存转写，本站没有录音可用于补回。</p>'}</div></details><p id="englishSaveNote" class="small muted"></p><button id="englishRetrySave" hidden>重试保存</button><div id="englishAssessment">${englishAssessmentHtml(s)}</div><pre id="englishDiagnostic" class="english-diagnostic" hidden></pre><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
  $('#englishBack').onclick=()=>show('english');
+ englishBindAssessment(s);$('#englishRetrySave').onclick=busy(async()=>{if(englishLastCall?.owner===user?.id)await englishFlushRecords(englishLastCall);toast('文字记录已保存')});
  if(!usable){$('#englishNewTopic').onclick=()=>show('english');return}
  const secure=typeof window!=='undefined'&&window.isSecureContext;
  const supported=typeof RTCPeerConnection!=='undefined'&&navigator.mediaDevices?.getUserMedia;
  if(!secure||!supported){$('#englishStartCall').disabled=true;$('#englishMicNote').textContent=!secure?'请通过 HTTPS 打开网站并允许麦克风。':'当前浏览器不支持实时语音，请使用新版 Chrome 或 Edge。'}
- $('#englishGuide').onclick=englishGuideCall;$('#englishStartCall').onclick=busy(englishStartCall);$('#englishStopCall').onclick=busy(()=>englishStopCall());
+ $('#englishGuide').onclick=englishGuideCall;$('#englishStartCall').onclick=busy(englishStartCall);$('#englishStopCall').onclick=busy(()=>englishStopCall(undefined,true));
  $('#englishMute').onclick=()=>{const call=englishCall;if(!call?.track||!call.ready)return;call.track.enabled=!call.track.enabled;$('#englishMute').textContent=call.track.enabled?'静音':'取消静音';englishStatus(call.track.enabled?'正在听你说…':'已静音')};
  $('#englishPlayAudio').onclick=busy(async()=>{await $('#englishRemoteAudio').play();$('#englishPlayAudio').hidden=true});
  $('#englishHint').onclick=busy(async()=>{const r=await api('/english/sessions/'+s.id+'/hint','POST');$('#englishHintText').textContent=r.hint;$('#englishHintText').hidden=false});
@@ -197,9 +251,32 @@ views.englishChat=async()=>{
  $('#englishPersonRole').onchange=e=>englishPersonRole=e.target.value;$('#englishPersonVoice').onchange=e=>englishPersonVoice=e.target.value;englishMicrophones();
  }};
 };
+function englishAssessmentHtml(s,teacherView=false){
+ const a=s.assessment;
+ if(!s.ended)return '<p class="small muted">结束后按整场文字交流评估；教师复核发布后计入平时成绩。</p>';
+ const result=a?.result;
+ return `<section class="english-score card"><h3>本次交流评价</h3>${s.record_issue?`<p class="warning">${esc(s.record_issue)}</p>`:''}<p>${a?.published?'教师已发布：<b>'+esc(a.teacher_score)+' / 100</b>':result?'AI建议分：<b>'+esc(result.score)+' / 100</b> · 待教师复核':'尚无有效评分'}</p>${a?.status==='queued'||a?.status==='running'?'<p>AI评估中，稍后刷新查看。</p>':''}${a?.error?`<p class="warning">${esc(a.error)}</p>`:''}${result?`<ul>${result.dimensions.map(d=>`<li>${esc(d.name)}：${d.score}/${d.max}<p>${esc(d.reason)}</p><blockquote>${esc(d.quote)}</blockquote></li>`).join('')}</ul><p>${esc(result.feedback)}</p>`:''}${a?.published?`<p>${esc(a.teacher_feedback)}</p>`:''}<p class="small muted">AI建议评分沿用已有DeepSeek等文字接口。仅依据转写文字，不评发音、语速或停顿。浏览器回传记录未经独立验证，正式成绩须教师复核。</p>${!teacherView?'<button id="englishAssess">生成/重试AI建议分</button><button id="englishRefreshAssessment">刷新评价</button>':''}</section>`;
+}
+function englishBindAssessment(s){
+ if($('#englishAssess'))$('#englishAssess').onclick=busy(async()=>{await api('/english/sessions/'+s.id+'/assess','POST');toast('已加入评估队列');await show('englishChat')});
+ if($('#englishRefreshAssessment'))$('#englishRefreshAssessment').onclick=()=>show('englishChat');
+}
 views.englishHistory=async()=>{
- englishCleanup();const rows=await api('/english/sessions');
- return {html:heading('我的对话记录','回看练习文字，下一次继续进步。')+`<section class="card table-wrap"><table><thead><tr><th>话题</th><th>时间</th><th>回答轮数</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.topic.title)}</td><td>${esc(englishDate(s.created))}</td><td>${s.turns}</td><td><button data-resume-english="${s.id}">查看 →</button></td></tr>`).join('')}</tbody></table>${!rows.length?'<p class="empty">还没有练习记录，选个话题开始吧。</p>':''}</section>`,bind(){document.querySelectorAll('[data-resume-english]').forEach(b=>b.onclick=busy(async()=>{englishSession={id:Number(b.dataset.resumeEnglish)};await show('englishChat')}))}};
+ englishCleanup();const d=await api('/english/grades'),rows=englishHistoryBefore?await api('/english/sessions?before='+englishHistoryBefore):d.sessions;
+ return {html:heading('对话记录与平时成绩','记录保存在服务器；正式成绩由教师复核发布。')+`<section class="card"><h3>英语平时成绩：${d.average==null?'待发布':d.average+' / 100'}</h3><p>${esc(d.basis)}</p><p>已计入 ${d.published_count} 次练习</p></section><section class="card table-wrap"><table><thead><tr><th>话题</th><th>时间</th><th>回答轮数</th><th>AI建议分</th><th>教师成绩</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.topic.title)}</td><td>${esc(englishDate(s.created))}</td><td>${s.turns}</td><td>${s.assessment?.result?.score??'—'}</td><td>${s.assessment?.published?s.assessment.teacher_score:'待发布'}</td><td><button data-resume-english="${s.id}">查看 →</button></td></tr>`).join('')}</tbody></table>${!rows.length?'<p class="empty">还没有练习记录，选个话题开始吧。</p>':''}<button id="englishHistoryLatest">最新记录</button>${rows.length===50?'<button id="englishHistoryOlder">更早记录</button>':''}</section>`,bind(){$('#englishHistoryLatest').onclick=()=>{englishHistoryBefore=0;show('englishHistory')};if($('#englishHistoryOlder'))$('#englishHistoryOlder').onclick=()=>{englishHistoryBefore=rows.at(-1).id;show('englishHistory')};document.querySelectorAll('[data-resume-english]').forEach(b=>b.onclick=busy(async()=>{englishSession={id:Number(b.dataset.resumeEnglish)};await show('englishChat')}))}};
+};
+let englishReviewId=null,englishReviewStudent=0,englishReviewBefore=0;
+views.englishReview=async()=>{
+ englishCleanup();const rows=await api('/teacher/english/sessions?before='+englishReviewBefore+'&user_id='+englishReviewStudent);
+ return {html:heading('口语评价与平时成绩','复核整场对话文字，确认分数后发布。')+`<section class="card table-wrap"><table><thead><tr><th>学生</th><th>话题</th><th>时间</th><th>AI建议</th><th>教师成绩</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.name)}<br>${esc(s.student_no)}</td><td>${esc(s.topic.title)}</td><td>${esc(englishDate(s.created))}</td><td>${s.assessment?.result?.score??'—'}</td><td>${s.assessment?.published?s.assessment.teacher_score:'待发布'}</td><td><button data-english-review="${s.id}">查看与评分</button></td></tr>`).join('')}</tbody></table><button id="englishReviewLatest">全部最新记录</button>${rows.length===100?'<button id="englishReviewOlder">更早记录</button>':''}</section>`,bind(){$('#englishReviewLatest').onclick=()=>{englishReviewBefore=0;englishReviewStudent=0;show('englishReview')};if($('#englishReviewOlder'))$('#englishReviewOlder').onclick=()=>{englishReviewBefore=rows.at(-1).id;show('englishReview')};document.querySelectorAll('[data-english-review]').forEach(b=>b.onclick=()=>{englishReviewId=Number(b.dataset.englishReview);show('englishReviewDetail')})}};
+};
+views.englishReviewDetail=async()=>{
+ englishCleanup();if(!englishReviewId)return views.englishReview();const s=await api('/teacher/english/sessions/'+englishReviewId),a=s.assessment;
+ return {html:heading(esc(s.topic.title),'转写文字及评分依据','<button id="englishReviewBack">← 返回列表</button>')+`<section class="card">${s.turns.map(t=>`<p><b>${t.role==='student'?'学生':'AI'}</b> ${esc(t.text)}${t.details.final===false?' <small class="warning">（未完成转写）</small>':''}</p>`).join('')||'<p>没有文字记录，无法据此评估。</p>'}</section>`+englishAssessmentHtml(s,true)+`<button id="englishTeacherAssess">请求/重试AI评估</button><form id="englishGradeForm" class="card"><h3>教师复核</h3><label>整场成绩（0–100）<input type="number" name="score" min="0" max="100" step="0.1" required value="${a?.teacher_score??a?.result?.score??''}"></label><label>反馈<textarea name="feedback" maxlength="4000">${esc(a?.teacher_feedback||'')}</textarea></label><label><input type="checkbox" name="published" ${a?.published?'checked':''}>发布并计入平时成绩</label><label><input type="checkbox" name="reviewed">我已复核记录与评分依据，了解文字记录未经独立验证，分数不包含发音和语速测量</label><button class="primary">保存教师成绩</button></form>`,bind(){
+ $('#englishReviewBack').onclick=()=>show('englishReview');
+ $('#englishTeacherAssess').onclick=busy(async()=>{await api('/teacher/english/sessions/'+s.id+'/assess','POST');toast('已加入评估队列');show('englishReviewDetail')});
+ $('#englishGradeForm').onsubmit=busy(async e=>{const x=Object.fromEntries(new FormData(e.target));x.score=Number(x.score);x.published=x.published==='on';x.reviewed=x.reviewed==='on';x.expected_hash=s.record_hash;await api('/teacher/english/sessions/'+s.id+'/grade','POST',x);toast('成绩已保存');show('englishReviewDetail')});
+ }};
 };
 views.englishSettings=async()=>{
  englishCleanup();const s=await api('/teacher/english/realtime-settings');
@@ -219,4 +296,4 @@ views.englishProfile=async()=>{
  $('#englishInterests').onsubmit=busy(async e=>{await api('/english/profile','POST',{interests:new FormData(e.target).getAll('interest')});toast('兴趣已保存，话题会优先展示你感兴趣的内容')});$('#englishChooseTopic').onclick=()=>show('english');
  }};
 };
-views.englishStudents=async()=>{englishCleanup();const rows=await api('/teacher/english/students');return {html:heading('英语练习档案','查看参与记录和下一步练习建议，口语模块暂不生成正式成绩。')+`<section class="card table-wrap"><table><thead><tr><th>姓名 / 学号</th><th>有效样本</th><th>回答 / 语音</th><th>下次练习建议</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.name)}<br><small>${esc(s.student_no)}</small></td><td>${s.profile.completed_samples}</td><td>${s.profile.practice_turns} / ${s.profile.spoken_turns}</td><td>${esc(s.profile.recommendation)}</td></tr>`).join('')}</tbody></table>${!rows.length?'<p class="empty">暂无学生英语练习记录。</p>':''}</section>`}};
+views.englishStudents=async()=>{englishCleanup();const rows=await api('/teacher/english/students');return {html:heading('英语练习档案','查看参与记录和下一步练习建议，正式成绩在“口语评价与成绩”中复核发布。')+`<section class="card table-wrap"><table><thead><tr><th>姓名 / 学号</th><th>有效样本</th><th>回答 / 语音</th><th>平时成绩 / 已发布次数</th><th>下次练习建议</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.name)}<br><small>${esc(s.student_no)}</small></td><td>${s.profile.completed_samples}</td><td>${s.profile.practice_turns} / ${s.profile.spoken_turns}</td><td>${s.grade?.average??'待发布'} / ${s.grade?.published_count??0}</td><td>${esc(s.profile.recommendation)}</td><td><button data-english-student-review="${s.id}">记录与评分</button></td></tr>`).join('')}</tbody></table>${!rows.length?'<p class="empty">暂无学生英语练习记录。</p>':''}</section>`,bind(){document.querySelectorAll('[data-english-student-review]').forEach(b=>b.onclick=()=>{englishReviewStudent=Number(b.dataset.englishStudentReview);englishReviewBefore=0;show('englishReview')})}}};

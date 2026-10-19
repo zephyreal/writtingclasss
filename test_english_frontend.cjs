@@ -25,7 +25,7 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  assert(ctx.tracksStopped===1&&ctx.closed===1);
  vm.runInContext(`testCall={sid:1,queue:Promise.resolve(),captions:new Map(),saved:new Set()};englishCaption(testCall,'student','item_1','<script>',true);englishCaption(testCall,'student','item_1','<script>',true)`,ctx);
  assert(node('#englishCaptions').innerHTML.includes('&lt;script&gt;'));
- assert(vm.runInContext('testCall.saved.size',ctx)===1);
+ await vm.runInContext('testCall.queue',ctx);assert(vm.runInContext('testCall.saved.size',ctx)===1);
  // Exercise the complete RTC handshake and session gating with a simulated cloud.
  const sent=[];let track={kind:'audio',enabled:true,stop(){}};
  ctx.navigator.mediaDevices.getUserMedia=async()=>({getTracks:()=>[track],getAudioTracks:()=>[track]});
@@ -80,13 +80,31 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  assert(vm.runInContext('englishCall===null',ctx));
  assert(node('#englishDiagnostic').textContent.includes('insufficient_quota'));
  vm.runInContext('englishCleanup()',ctx);
+ // Read official final-output snapshots and opaque IDs; retry failed persistence.
+ await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
+ const saved=[];let failOnce=true;
+ ctx.saveFixture=async(path,method,body)=>{if(path.endsWith('/transcript')){if(failOnce){failOnce=false;throw Error('temporary network failure')}saved.push(body);return {ok:true}}return ctx.fixtureSession};
+ vm.runInContext('api=saveFixture',ctx);
+ vm.runInContext(`englishEvent(englishCall,{data:JSON.stringify({type:'conversation.item.input_audio_transcription.delta',item_id:'student/+=opaque',text:'I build ',stash:'a robot'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'conversation.item.input_audio_transcription.completed',item_id:'student/+=opaque',transcript:'I build a robot.'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'response.done',response:{status:'completed',output:[{type:'message',id:'assistant/+=opaque',role:'assistant',content:[{type:'audio',transcript:'That sounds useful.'}]}]}})},englishCall.channel)`,ctx);
+ await vm.runInContext('englishCall.queue',ctx);
+ assert(vm.runInContext('Array.from(englishCall.captions.values()).some(x=>x.failed)',ctx));
+ await vm.runInContext('englishFlushRecords(englishCall)',ctx);
+ assert(saved.some(x=>x.role==='student'&&x.item_id==='student/+=opaque'&&x.text==='I build a robot.'));
+ assert(saved.some(x=>x.role==='assistant'&&x.text==='That sounds useful.'));
+ vm.runInContext('englishCleanup()',ctx);
  // Permission dialog resolved after navigation: no open mic, no cloud connection.
  let release;ctx.lateStream={getTracks(){return [{stop(){ctx.tracksStopped++}}]}};
  ctx.navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>{release=resolve});
+ vm.runInContext('englishLastCall=null',ctx);
  const pending=vm.runInContext('englishStartCall()',ctx);
  vm.runInContext('englishCleanup()',ctx);release(ctx.lateStream);await pending;
  assert(ctx.tracksStopped===2);
+ vm.runInContext(`api=async p=>p==='/english/profile'?fixtureProfile:p==='/english/grades'?{sessions:[],average:null,published_count:0,basis:'教师发布后计入'}:fixtureSession`,ctx);
  result=await vm.runInContext('views.englishProfile()',ctx);
  assert(result.html.includes('实时对话不生成')&&result.html.includes('英语等级'));
- console.log('Realtime UI: no uploads/TTS, HTTPS gate, transcript escaping/idempotence, navigation and late-permission cleanup passed');
+ const scored=vm.runInContext(`englishAssessmentHtml({ended:1,assessment:{published:true,teacher_score:0,teacher_feedback:'<unsafe>',status:'manual',result:{score:0,feedback:'<unsafe>',dimensions:[{name:'回应',score:0,max:40,reason:'<reason>',quote:'<quote>'}]}}})`,ctx);
+ assert(scored.includes('0 / 100')&&scored.includes('&lt;unsafe&gt;')&&!scored.includes('<unsafe>'));
+ const history=await vm.runInContext('views.englishHistory()',ctx);
+ assert(history.html.includes('待发布')&&history.html.includes('教师发布后计入'));
+ console.log('Records snapshots, retry, realtime UI: no uploads/TTS, HTTPS gate, transcript escaping/idempotence, navigation and late-permission cleanup passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

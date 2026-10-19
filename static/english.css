@@ -11,3 +11,5 @@
 .english-diagnostic{white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;font:13px/1.7 ui-monospace,monospace;background:#fff3e8;border:1px solid #e8cdb3;border-radius:10px;padding:16px;margin-top:16px;color:#75471f}
 
 .english-person-options{display:flex;gap:16px;max-width:520px;margin:20px auto;text-align:left}.english-person-options label{flex:1;min-width:0;font-size:13px}.english-person-options select{width:100%;margin-top:8px}@media(max-width:480px){.english-person-options{flex-direction:column;gap:8px}}
+
+.english-score{text-align:left;margin:22px 0}.english-score li{line-height:1.7;margin:14px 0}.english-score blockquote{font-size:13px;margin:8px 0;padding:10px;border-left:3px solid #9bb5aa;background:#f4f7f5}#englishGradeForm input[type=checkbox]{width:auto;margin-right:8px}
