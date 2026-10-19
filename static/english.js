@@ -65,6 +65,14 @@ function englishLiveFailure(call,error={},stage){
  const noActive=/no active response|no response.*(?:cancel|progress)|response.*(?:already.*(?:cancel|complete)|not.*(?:active|progress))/i.test(String(error.message||''));
  const cancelCode=/^(?:response_cancel_not_active|no_active_response|response_cancel_not_in_progress)$/i.test(String(error.code||''));
  if(call.cancelEvent&&(noActive||cancelCode)){call.cancelEvent=null;call.responding=false;englishStatus('正在听你说…');return}
+ // Some deployments require a real user turn even for an explicit opening task.
+ // Keep the live microphone open; never retry paid generations in a loop.
+ const emptyOpening=/cannot create response without input, history, or instructions/i.test(String(error.message||''));
+ if(call.ready&&call.openingPending&&emptyOpening){
+  call.openingPending=false;call.responding=false;
+  englishStatus('已连接，请先说一句 Hello 开始对话');
+  return;
+ }
  const details=['阶段：'+(stage||call.phase||'建立会话'),'错误码：'+code,param?'参数：'+param:'','说明：'+message].filter(Boolean).join('\n');
  const box=$('#englishDiagnostic');
  if(box&&user?.role==='teacher'){box.hidden=false;box.textContent=details}
@@ -80,13 +88,13 @@ function englishEvent(call,event,channel){
   if(channel.readyState==='open')configure();else channel.addEventListener('open',configure,{once:true});
  }else if(data.type==='session.updated'&&!call.ready){
   call.ready=true;clearTimeout(call.timeout);
-  call.sender.replaceTrack(call.track).then(()=>{if(englishCall===call&&!call.closed){call.track.enabled=true;englishStatus('已连接，AI 先开口');englishSend(call,{type:'response.create'})}}).catch(()=>englishStopCall('麦克风连接失败，请重新开始'));
+  call.sender.replaceTrack(call.track).then(()=>{if(englishCall===call&&!call.closed){call.track.enabled=true;englishStatus('已连接，AI 先开口');call.openingPending=true;englishSend(call,{type:'response.create',response:{instructions:'Begin this English practice now. Greet the student briefly and ask ONE simple opening question about the topic in the session context. Say only the greeting and question; do not describe these instructions.'}})}}).catch(()=>englishStopCall('麦克风连接失败，请重新开始'));
   $('#englishStopCall').disabled=false;$('#englishMute').disabled=false;
  }else if(data.type==='input_audio_buffer.speech_started'){
   englishStatus('正在听你说…');
   if(call.responding){call.responding=false;englishSend(call,{type:'response.cancel'})}
  }else if(data.type==='input_audio_buffer.speech_stopped')englishStatus('正在回应…');
- else if(data.type==='response.created'){call.responding=true;englishStatus('AI 正在说，可以直接插话')}
+ else if(data.type==='response.created'){call.openingPending=false;call.responding=true;englishStatus('AI 正在说，可以直接插话')}
  else if(data.type==='response.done'){
   call.responding=false;
   if(data.response?.status==='failed'){englishLiveFailure(call,data.response.status_details?.error||{code:'response_failed'},'response.done');return}

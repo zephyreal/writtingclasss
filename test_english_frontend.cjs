@@ -28,7 +28,7 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  const sent=[];let track={kind:'audio',enabled:true,stop(){}};
  ctx.navigator.mediaDevices.getUserMedia=async()=>({getTracks:()=>[track],getAudioTracks:()=>[track]});
  class Peer{
-  constructor(){this.iceGatheringState='complete';this.connectionState='new';this.channel={readyState:'open',send:raw=>{const event=JSON.parse(raw);sent.push(event);if(event.type==='session.update')this.channel.onmessage({data:JSON.stringify({type:'session.updated'})})}}}
+  constructor(){this.iceGatheringState='complete';this.connectionState='new';this.channel={readyState:'open',send:raw=>{const event=JSON.parse(raw);sent.push(event);if(event.type==='response.create')assert(event.response?.instructions?.trim(),'a first response with no user input must carry an explicit opening task');if(event.type==='session.update')this.channel.onmessage({data:JSON.stringify({type:'session.updated'})})}}}
   addTrack(t){this.sender={track:t,replaceTrack:async value=>{this.sender.track=value}}}
   getSenders(){return [this.sender]}
   createDataChannel(){return this.channel}
@@ -47,6 +47,16 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  assert(node('#englishDiagnostic').textContent.includes('session.audio.output.voice'));
  assert(!node('#englishDiagnostic').textContent.includes('sk-FAKE')&&!node('#englishDiagnostic').textContent.includes('fake-token'));
  assert(vm.runInContext('englishCall===null',ctx));
+ // A deployment rejecting proactive opening must still permit a real speech turn.
+ await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
+ vm.runInContext(`englishEvent(englishCall,{data:JSON.stringify({type:'error',error:{code:'invalid_request_error',param:'response',message:'Cannot create response without input, history, or instructions'}})},englishCall.channel)`,ctx);
+ assert(vm.runInContext('englishCall!==null&&englishCall.track.enabled',ctx));
+ assert(node('#englishLiveStatus').textContent.includes('Hello'));
+ const attempts=sent.filter(x=>x.type==='response.create').length;
+ vm.runInContext(`englishEvent(englishCall,{data:JSON.stringify({type:'input_audio_buffer.speech_started'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'response.created'})},englishCall.channel)`,ctx);
+ assert(vm.runInContext('englishCall!==null&&englishCall.responding',ctx));
+ assert(sent.filter(x=>x.type==='response.create').length===attempts,'no generation retry or artificial user turn');
+ vm.runInContext('englishCleanup()',ctx);
  // A cancellation race must keep the microphone/session alive.
  await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
  vm.runInContext(`englishCall.responding=true;englishEvent(englishCall,{data:JSON.stringify({type:'input_audio_buffer.speech_started'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'error',error:{code:'invalid_request_error',message:'Cancellation failed: no active response found.'}})},englishCall.channel)`,ctx);
