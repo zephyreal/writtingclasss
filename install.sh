@@ -9,7 +9,7 @@ apt-get update
 apt-get install -y python3-venv python3-pip nginx curl libreoffice-writer fonts-noto-cjk
 id writingclass >/dev/null 2>&1 || useradd --system --home /var/lib/writing-class --shell /usr/sbin/nologin writingclass
 install -d -m 755 /opt/writing-class
-cp -r "$SOURCE_DIR/app.py" "$SOURCE_DIR/review_pipeline.py" "$SOURCE_DIR/seed.py" "$SOURCE_DIR/manage.py" "$SOURCE_DIR/static" "$SOURCE_DIR/requirements.txt" /opt/writing-class/
+cp -r "$SOURCE_DIR/app.py" "$SOURCE_DIR/review_pipeline.py" "$SOURCE_DIR/seed.py" "$SOURCE_DIR/manage.py" "$SOURCE_DIR/static" "$SOURCE_DIR/course_assets" "$SOURCE_DIR/requirements.txt" /opt/writing-class/
 python3 -m venv /opt/writing-class/.venv
 /opt/writing-class/.venv/bin/pip install -r /opt/writing-class/requirements.txt
 install -d -o writingclass -g writingclass -m 700 /var/lib/writing-class

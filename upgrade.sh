@@ -10,15 +10,18 @@ apt-get update
 apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk
 /opt/writing-class/.venv/bin/pip install -r "$UPDATE_SOURCE/requirements.txt"
 install -d -m 700 /root/course-backups
-UPDATE_BACKUP="/root/course-backups/before-v1.2-$(date +%Y%m%d-%H%M%S).tar.gz"
+UPDATE_BACKUP="/root/course-backups/before-v1.3-$(date +%Y%m%d-%H%M%S).tar.gz"
 systemctl stop writing-class
 trap 'systemctl start writing-class || true' EXIT
 backup_paths=(opt/writing-class/app.py opt/writing-class/seed.py opt/writing-class/manage.py opt/writing-class/static opt/writing-class/requirements.txt var/lib/writing-class)
 if [ -f /opt/writing-class/review_pipeline.py ]; then backup_paths+=(opt/writing-class/review_pipeline.py); fi
+if [ -d /opt/writing-class/course_assets ]; then backup_paths+=(opt/writing-class/course_assets); fi
 tar -czf "$UPDATE_BACKUP" -C / "${backup_paths[@]}"
 chmod 600 "$UPDATE_BACKUP"
 cp "$UPDATE_SOURCE/app.py" "$UPDATE_SOURCE/review_pipeline.py" "$UPDATE_SOURCE/seed.py" "$UPDATE_SOURCE/requirements.txt" /opt/writing-class/
 cp -r "$UPDATE_SOURCE/static/." /opt/writing-class/static/
+install -d -m 755 /opt/writing-class/course_assets
+cp -r "$UPDATE_SOURCE/course_assets/." /opt/writing-class/course_assets/
 cd /opt/writing-class
 if ! runuser -u writingclass -- env DATA_DIR=/var/lib/writing-class TZ=Asia/Shanghai .venv/bin/python -c 'import app; print("数据库升级完成，已有账号、课件、作业和成绩已保留")'; then
     echo '迁移失败，恢复升级前代码和数据'
@@ -28,7 +31,7 @@ fi
 systemctl start writing-class
 for attempt in 1 2 3 4 5 6 7 8; do
     if curl -fsS http://127.0.0.1:8000/healthz; then
-        echo; echo 'v1.2升级成功，请Ctrl+F5刷新。教师账号和密码不变。'
+        echo; echo 'v1.3升级成功，请Ctrl+F5刷新。教师账号和密码不变。'
         echo "升级前备份：$UPDATE_BACKUP"
         trap - EXIT
         exit 0

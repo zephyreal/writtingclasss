@@ -216,6 +216,7 @@ import pytest
 from contextlib import contextmanager
 @pytest.fixture(autouse=True)
 def docx_render_fixture(monkeypatch,tmp_path):
+    with a.db() as c:c.execute('DELETE FROM throttle')
     original=a.prepare_document
     @contextmanager
     def wrapped(path):
@@ -315,3 +316,34 @@ def test_five_mib_boundary():
     assert s.post('/api/submissions',data={'assignment_id':1},files={'file':('five.pdf',b'%PDF-'+b'x'*(a.LIMIT-5))}).status_code==200
     s2=student('five200')
     assert s2.post('/api/submissions',data={'assignment_id':1},files={'file':('large.pdf',b'%PDF-'+b'x'*(a.LIMIT-4))}).status_code==413
+
+def test_four_course_catalog_and_placeholders():
+    anonymous=TestClient(a.app,headers=H)
+    assert anonymous.get('/api/courses').status_code==401
+    s=student('courses100')
+    rows=s.get('/api/courses').json()
+    assert [x['title'] for x in rows]==['学术论文写作','机械工程专业英语','智能装备基础','智能制造课程设计']
+    assert {x['id'] for x in rows if x['state']=='planned'}=={'english','equipment'}
+    assert s.get('/api/chapters').status_code==200
+    assert s.get('/api/assignments').status_code==200
+
+def test_gomoku_local_assets_authentication_and_paths():
+    import hashlib,re
+    anonymous=TestClient(a.app,headers=H)
+    assert anonymous.get('/courses/design/gomoku/').status_code==401
+    assert anonymous.get('/courses/design/gomoku/gomoku_uint8_qop_u8u8.onnx').status_code==401
+    s=student('gomoku100')
+    html=s.get('/courses/design/gomoku/')
+    assert html.status_code==200 and 'text/html' in html.headers['content-type']
+    assert '智能制造案例' in html.text and 'ai-worker.js' in html.text
+    js=s.get('/courses/design/gomoku/ai-worker.js?v=safe-vcf-tested-20260911-1')
+    assert js.status_code==200 and 'application/javascript' in js.headers['content-type']
+    model=s.get('/courses/design/gomoku/gomoku_uint8_qop_u8u8.onnx?v=safe-vcf-tested-20260911-1')
+    assert model.status_code==200 and len(model.content)==150730
+    assert hashlib.sha1(b'blob '+str(len(model.content)).encode()+b'\0'+model.content).hexdigest()=='43815dcdfafdf2a41528d00058b1c7af4be33b09'
+    assert s.get('/courses/design/gomoku/%2e%2e%2fapp.py').status_code==404
+    assert s.get('/courses/design/gomoku/not-there.wasm').status_code==404
+    assert s.get('/courses/design/gomoku/index.html').status_code==200
+    assert s.get('/courses/design/gomoku/gomoku_single.onnx').status_code==200
+    assert s.post('/api/logout').status_code==200
+    assert s.get('/courses/design/gomoku/ai-worker.js').status_code==401

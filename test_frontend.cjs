@@ -1,7 +1,7 @@
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert');
 const nodes=new Map(),listeners={};
-function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,style:{},addEventListener(){},showModal(){},close(){},querySelectorAll(){return []}});return nodes.get(s)}
-const ctx=vm.createContext({document:{querySelector:node,addEventListener:(name,fn)=>listeners[name]=fn},fetch:async()=>({ok:false,status:401,json:async()=>({detail:'请登录'})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
+function node(s){if(s==='#gomokuFrame'&&!nodes.get('#gameMount')?.innerHTML.includes('id="gomokuFrame"'))return null;if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,style:{},addEventListener(){},showModal(){},close(){},querySelectorAll(){return []}});return nodes.get(s)}
+const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},fetch:async()=>({ok:false,status:401,json:async()=>({detail:'请登录'})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
 vm.runInContext(fs.readFileSync(__dirname+'/static/app.js','utf8'),ctx);
 (async()=>{
  await new Promise(r=>setTimeout(r,0));
@@ -17,5 +17,25 @@ vm.runInContext(fs.readFileSync(__dirname+'/static/app.js','utf8'),ctx);
  assert(!prevented,'普通点击不应被档案按钮处理器阻止');
  const triage=vm.runInContext(`triageBlock({recommendation:'return',reasons:['需补充实验'],required_changes:['写明参数'],evidence:['原文'],evidence_matches:[true]})`,ctx);
  assert(triage.includes('需教师确认')&&triage.includes('写明参数'));
- console.log('Frontend rendering and event smoke checks passed');
+ const courses=vm.runInContext('COURSES',ctx);
+ ctx.fixtureCourses=courses;
+ vm.runInContext('api=async()=>fixtureCourses',ctx);
+ result=await vm.runInContext('views.portal()',ctx);
+ for(const title of ['学术论文写作','机械工程专业英语','智能装备基础','智能制造课程设计'])assert(result.html.includes(title));
+ assert((result.html.match(/data-open-course=/g)||[]).length===4);
+ await vm.runInContext('selectCourse("english")',ctx);
+ assert(node('#content').innerHTML.includes('课程入口已就绪'));
+ assert(!node('#nav').innerHTML.includes('写作练习'));
+ await vm.runInContext('selectCourse("equipment")',ctx);
+ assert(node('#content').innerHTML.includes('智能装备基础'));
+ await vm.runInContext('selectCourse("design")',ctx);
+ assert(node('#content').innerHTML.includes('AI 五子棋'));
+ node('#launchGomoku').onclick();
+ assert(node('#gameMount').innerHTML.includes('/courses/design/gomoku/'));
+ assert(node('#gameMount').innerHTML.includes('title="智能制造课程设计：AI五子棋"'));
+ node('#unloadGomoku').onclick();
+ assert(!node('#gameMount').innerHTML.includes('<iframe'));
+ vm.runInContext('activeCourse="writing";renderNavigation()',ctx);
+ assert(node('#nav').innerHTML.includes('写作练习')&&node('#nav').innerHTML.includes('学习档案'));
+ console.log('Frontend rendering, four-course navigation and embedded game checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

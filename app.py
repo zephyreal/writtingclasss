@@ -20,7 +20,7 @@ DB=DATA/'course.db'
 LIMIT=5_000_000
 SECURE=os.getenv('COOKIE_SECURE','false').lower()=='true'
 POOL=ThreadPoolExecutor(max_workers=1)
-app=FastAPI(title='研写 · 论文写作课程平台',docs_url=None,redoc_url=None)
+app=FastAPI(title='智学工坊 · 课程教学平台',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -159,6 +159,31 @@ def password(x:Password,u=Depends(current)):
         c.execute('UPDATE users SET password=? WHERE id=?',(pwdhash(x.new),u['id']))
         c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],))
     return {'ok':True}
+
+COURSES = [
+    {'id':'writing','title':'学术论文写作','subtitle':'Academic Writing','description':'从研究问题、学术表达，到图表规范与论文修改。','state':'open','label':'课程已开放'},
+    {'id':'english','title':'机械工程专业英语','subtitle':'English for Mechanical Engineering','description':'专业阅读、工程术语与学术交流，课程内容待建设。','state':'planned','label':'待建设'},
+    {'id':'equipment','title':'智能装备基础','subtitle':'Fundamentals of Intelligent Equipment','description':'面向智能装备的知识学习与实践，课程内容待建设。','state':'planned','label':'待建设'},
+    {'id':'design','title':'智能制造课程设计','subtitle':'Intelligent Manufacturing Design','description':'通过AI五子棋交互案例，探索智能决策与工程实践。','state':'open','label':'实践案例已开放'},
+]
+@app.get('/api/courses')
+def course_catalog(u=Depends(current)):
+    return COURSES
+
+GOMOKU_ROOT=ROOT/'course_assets'/'gomoku'
+GOMOKU_FILES={'index.html','ai-worker.js','gomoku_uint8_qop_u8u8.onnx','gomoku_single.onnx','index_single_wasm118_mobile.html','index_single_wasm_abtest.html','gomoku.cpp','vct-worker.js','README.md'}
+@app.get('/courses/design/gomoku/')
+def gomoku_home(u=Depends(current)):
+    path=GOMOKU_ROOT/'index.html'
+    if not path.is_file():raise HTTPException(503,'课程案例资源未安装，请执行新版升级脚本')
+    return FileResponse(path,media_type='text/html',headers={'Cache-Control':'no-store'})
+@app.get('/courses/design/gomoku/{asset:path}')
+def gomoku_asset(asset:str,u=Depends(current)):
+    if asset not in GOMOKU_FILES:raise HTTPException(404,'案例资源不存在')
+    path=GOMOKU_ROOT/asset
+    if not path.is_file():raise HTTPException(404,'案例资源未安装')
+    media='application/javascript' if asset.endswith('.js') else 'application/octet-stream' if asset.endswith('.onnx') else 'text/html' if asset.endswith('.html') else 'text/plain'
+    return FileResponse(path,media_type=media,headers={'Cache-Control':'private, max-age=300'})
 
 @app.get('/api/chapters')
 def chapters(u=Depends(current)):
