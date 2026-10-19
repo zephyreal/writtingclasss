@@ -1,0 +1,2 @@
+# Optional CPU speech recognition. Install with enable-english-voice.sh.
+faster-whisper==1.2.1

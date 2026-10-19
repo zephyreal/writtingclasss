@@ -1,4 +1,5 @@
 import os,tempfile,io,json,time
+os.environ['ENGLISH_NEWS_AUTO']='0'
 import pytest
 os.environ['DATA_DIR']=tempfile.mkdtemp(prefix='writing-test-')
 from fastapi.testclient import TestClient
@@ -197,6 +198,10 @@ with app.db() as c:
     subprocess.run([sys.executable,'-c',script],cwd=code,env=env,check=True,capture_output=True)
     (code/'app.py').write_text(Path(a.__file__).read_text())
     (code/'review_pipeline.py').write_text((Path(a.__file__).parent/'review_pipeline.py').read_text())
+    import shutil
+    for module in ('english_course.py','english_speech.py'):
+        shutil.copy2(Path(a.__file__).parent/module,code/module)
+    shutil.copytree(Path(a.__file__).parent/'vendor',code/'vendor',dirs_exist_ok=True)
     verify="""import app,json
 with app.db() as c:
  u=c.execute('SELECT * FROM users WHERE id=101').fetchone()
@@ -323,7 +328,7 @@ def test_four_course_catalog_and_placeholders():
     s=student('courses100')
     rows=s.get('/api/courses').json()
     assert [x['title'] for x in rows]==['学术论文写作','机械工程专业英语','智能装备基础','智能制造课程设计']
-    assert {x['id'] for x in rows if x['state']=='planned'}=={'english','equipment'}
+    assert {x['id'] for x in rows if x['state']=='planned'}=={'equipment'}
     assert s.get('/api/chapters').status_code==200
     assert s.get('/api/assignments').status_code==200
 

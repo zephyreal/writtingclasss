@@ -3,6 +3,7 @@ const nodes=new Map(),listeners={};
 function node(s){if(s==='#gomokuFrame'&&!nodes.get('#gameMount')?.innerHTML.includes('id="gomokuFrame"'))return null;if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,style:{},addEventListener(){},showModal(){},close(){},querySelectorAll(){return []}});return nodes.get(s)}
 const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},fetch:async()=>({ok:false,status:401,json:async()=>({detail:'请登录'})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
 vm.runInContext(fs.readFileSync(__dirname+'/static/app.js','utf8'),ctx);
+vm.runInContext(fs.readFileSync(__dirname+'/static/english.js','utf8'),ctx);
 (async()=>{
  await new Promise(r=>setTimeout(r,0));
  vm.runInContext(`user={name:'测试学生',role:'student'};api=async()=>[{id:1,title:'论文作业',instructions:'要求',deadline:'',rubric:[],submission:{id:3,returned:1,return_reason:'补充实验参数',returned_at:'2026-10-19',filename:'旧稿.docx'}}]`,ctx);
@@ -23,8 +24,9 @@ vm.runInContext(fs.readFileSync(__dirname+'/static/app.js','utf8'),ctx);
  result=await vm.runInContext('views.portal()',ctx);
  for(const title of ['学术论文写作','机械工程专业英语','智能装备基础','智能制造课程设计'])assert(result.html.includes(title));
  assert((result.html.match(/data-open-course=/g)||[]).length===4);
+ vm.runInContext(`api=async(path)=>path==='/english/profile'?{recommendation:'先练短句'}:{topics:[],categories:{},news:{updated:null,checked:null,error:'',stale:true},ai_configured:false,speech_enabled:false}`,ctx);
  await vm.runInContext('selectCourse("english")',ctx);
- assert(node('#content').innerHTML.includes('课程入口已就绪'));
+ assert(node('#content').innerHTML.includes('今天，你想聊什么'));
  assert(!node('#nav').innerHTML.includes('写作练习'));
  await vm.runInContext('selectCourse("equipment")',ctx);
  assert(node('#content').innerHTML.includes('智能装备基础'));

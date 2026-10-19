@@ -162,7 +162,7 @@ def password(x:Password,u=Depends(current)):
 
 COURSES = [
     {'id':'writing','title':'学术论文写作','subtitle':'Academic Writing','description':'从研究问题、学术表达，到图表规范与论文修改。','state':'open','label':'课程已开放'},
-    {'id':'english','title':'机械工程专业英语','subtitle':'English for Mechanical Engineering','description':'专业阅读、工程术语与学术交流，课程内容待建设。','state':'planned','label':'待建设'},
+    {'id':'english','title':'机械工程专业英语','subtitle':'English for Mechanical Engineering','description':'从感兴趣的话题开始，用简单英语对话，逐步建立口语学习画像。','state':'open','label':'英语对话已开放'},
     {'id':'equipment','title':'智能装备基础','subtitle':'Fundamentals of Intelligent Equipment','description':'面向智能装备的知识学习与实践，课程内容待建设。','state':'planned','label':'待建设'},
     {'id':'design','title':'智能制造课程设计','subtitle':'Intelligent Manufacturing Design','description':'通过AI五子棋交互案例，探索智能决策与工程实践。','state':'open','label':'实践案例已开放'},
 ]
@@ -639,6 +639,9 @@ def ai_answer(pid:int,x:AIAnswer,u=Depends(current)):
 async def value_error(request,exc):return JSONResponse({'detail':str(exc)},400)
 @app.get('/healthz')
 def health():return {'ok':True}
+import english_course
+english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)
+
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 @app.get('/')
 def index():return FileResponse(ROOT/'static'/'index.html')

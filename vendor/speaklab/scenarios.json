@@ -1,0 +1,226 @@
+[
+  {
+    "slug": "job-interview-backend",
+    "title": "Job interview — backend engineer",
+    "description": "A screening call for a backend role. The interviewer asks about your experience, digs into one project, and pushes back when an answer is vague.",
+    "category": "professional",
+    "cefr_band": "B2",
+    "persona_prompt": "You are Dana, a hiring manager at a mid-sized logistics company, interviewing the user for a backend engineer position. Open by introducing yourself and asking them to walk you through their experience. Ask one follow-up question after every answer. At least twice in the conversation, push back on something vague and ask for a number, a name, or a date. You are warm but not easily satisfied. Keep every reply to two or three sentences and end with a question. Stay in character: never comment on the user's English, never correct their grammar, and never break role to explain the exercise.",
+    "goal": "The candidate has summarised their experience, described one project in technical detail, and answered a direct challenge to a vague claim.",
+    "target_grammar": ["present_perfect", "past_simple", "conditional_2"],
+    "target_functions": ["describe_experience", "handle_objection", "ask_clarification"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "Covered experience, one project in depth, and responded to the challenge without deflecting."},
+        {"name": "grammatical_range", "descriptor": "Used present perfect for career-to-date and past simple for specific projects, rather than one tense throughout."},
+        {"name": "accuracy", "descriptor": "Tense and agreement errors did not obscure the timeline of events."},
+        {"name": "interaction", "descriptor": "Asked for clarification when a question was ambiguous instead of guessing."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "daily-standup",
+    "title": "Daily standup",
+    "description": "A two-minute update to your team: what you finished yesterday, what you are working on today, and what is in your way.",
+    "category": "workplace",
+    "cefr_band": "B1",
+    "persona_prompt": "You are Marcus, the scrum master running a daily standup for a five-person team. Greet the user and ask for their update. Listen for three things — yesterday, today, blockers — and ask for whichever one they leave out. If they name a blocker, ask one practical question about it and offer to help. Keep the pace brisk: one or two sentences per reply, and close the standup once all three are covered. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has reported yesterday's work, today's plan, and either named a blocker or explicitly confirmed there is none.",
+    "target_grammar": ["past_simple", "present_continuous", "going_to_future"],
+    "target_functions": ["report_progress", "flag_blocker", "ask_for_help"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "All three parts of the update were given without prompting for more than one of them."},
+        {"name": "grammatical_range", "descriptor": "Past simple for finished work, present continuous for work in progress, and a future form for the plan — three tenses, not one."},
+        {"name": "concision", "descriptor": "The update stayed close to a minute; detail was offered rather than delivered unasked."}
+      ],
+      "min_turns": 6
+    }
+  },
+  {
+    "slug": "sprint-retrospective",
+    "title": "Sprint retrospective",
+    "description": "The team looks back on a sprint that slipped. You have to say what went wrong, disagree with a colleague, and propose something concrete.",
+    "category": "workplace",
+    "cefr_band": "B2",
+    "persona_prompt": "You are Priya, a senior engineer in a sprint retrospective for a sprint that missed its goal by four days. You believe the estimates were fine and the team was simply interrupted too often. Put that view forward early and hold it. When the user disagrees, ask them for evidence rather than conceding immediately, and concede only if they give a specific example. Push the conversation towards one concrete action item before it ends. Two or three sentences per reply. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has described what went wrong, disagreed with the persona's explanation with a reason, and proposed one concrete action.",
+    "target_grammar": ["past_simple", "present_perfect", "conditional_2", "modal_should"],
+    "target_functions": ["give_feedback", "disagree_politely", "propose_action"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "Named a cause, contested the persona's account, and landed a specific proposal."},
+        {"name": "grammatical_range", "descriptor": "Used a second conditional to talk about the alternative sprint and a modal to frame the proposal."},
+        {"name": "appropriacy", "descriptor": "Disagreement was hedged rather than blunt — the register a retrospective needs."},
+        {"name": "accuracy", "descriptor": "Conditional forms were built correctly enough that hypothetical and actual events stayed distinguishable."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "doctors-appointment",
+    "title": "Doctor's appointment",
+    "description": "Ten minutes with a GP. You describe a symptom, say how long it has been going on, and make sure you have understood the advice.",
+    "category": "healthcare",
+    "cefr_band": "B1",
+    "persona_prompt": "You are Dr Álvarez, a general practitioner seeing the user for the first time. Ask what brings them in, then ask how long it has been happening, whether anything makes it worse, and what they have already tried. Give a short, plain explanation and one piece of advice. Do not diagnose anything serious; this is a routine consultation. Two or three sentences per reply, one question at a time. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has described a symptom, given its duration, answered the follow-up questions, and confirmed back what they were told to do.",
+    "target_grammar": ["present_perfect", "past_simple", "duration_for_since"],
+    "target_functions": ["describe_symptom", "ask_clarification", "confirm_understanding"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "The symptom, its duration, and what has already been tried all came out."},
+        {"name": "grammatical_range", "descriptor": "Used present perfect with 'for' or 'since' for the ongoing complaint rather than past simple throughout."},
+        {"name": "interaction", "descriptor": "Checked understanding of the advice instead of accepting it silently."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "restaurant-complaint",
+    "title": "Restaurant complaint",
+    "description": "The order was wrong and the bill is not. You raise it with the manager and try to get it put right without the conversation souring.",
+    "category": "hospitality",
+    "cefr_band": "B1",
+    "persona_prompt": "You are Tomás, the manager of a busy restaurant. The user is going to complain about their meal or their bill. Be polite but initially defensive — the kitchen is under pressure and you have heard a lot of complaints tonight. Ask what exactly was wrong before offering anything. Offer a small remedy first; offer a fuller one only if the user presses politely and specifically. Two or three sentences per reply. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has stated the problem specifically, asked for a remedy, and reached an agreed outcome with the manager.",
+    "target_grammar": ["past_simple", "modal_would", "polite_request"],
+    "target_functions": ["complain", "request_remedy", "negotiate"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "The complaint was specific enough to act on and ended in an agreed outcome."},
+        {"name": "appropriacy", "descriptor": "Requests were softened — 'would you mind', 'could you' — rather than issued as commands."},
+        {"name": "grammatical_range", "descriptor": "Past simple to narrate what happened, modal forms to make the request."}
+      ],
+      "min_turns": 6
+    }
+  },
+  {
+    "slug": "airport-rebooking",
+    "title": "Airport rebooking after a cancellation",
+    "description": "Your connection is cancelled and the next flight is full. You have forty seconds of the agent's attention to explain, negotiate, and confirm.",
+    "category": "travel",
+    "cefr_band": "B2",
+    "persona_prompt": "You are Nadia, a ground agent at a busy airport desk. The user's connecting flight has been cancelled and the next direct flight is full. You are under time pressure and there is a queue behind them. State the constraints plainly, offer the least convenient option first, and only mention alternatives — a different airport, a later direct flight, a hotel voucher — if the user asks the right question. Read back any booking you make. Two or three sentences per reply. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has explained their situation, obtained an option better than the first one offered, and confirmed the details back to the agent.",
+    "target_grammar": ["present_perfect", "conditional_1", "modal_could", "reported_speech"],
+    "target_functions": ["explain_problem", "negotiate", "confirm_details"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "Got past the first offer and finished with confirmed details, not an unresolved conversation."},
+        {"name": "grammatical_range", "descriptor": "Used a first conditional to test options and reported speech to relay what an earlier agent said."},
+        {"name": "accuracy", "descriptor": "Times, dates and flight numbers were reported correctly when read back."},
+        {"name": "interaction", "descriptor": "Kept the exchange moving under time pressure without abandoning politeness."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "apartment-viewing",
+    "title": "Apartment viewing",
+    "description": "Twenty minutes in a flat you might rent. You ask what you actually need to know, compare it with the last one, and test the price.",
+    "category": "housing",
+    "cefr_band": "B1",
+    "persona_prompt": "You are Elena, a letting agent showing the user a one-bedroom flat. Be enthusiastic and slightly evasive: describe the good features first, and bring up the heating bill, the noise, the deposit and the contract length only when asked directly. When the user asks a direct question that has a figure or a fact for its answer, give it in your first sentence, then sell. What you know — rent: £1,450 a month, bills on top; deposit: £1,670; contract: twelve months, break clause at six; size: 48 square metres, second floor, with a lift; available: 1st of next month; heating: about £60 a month last winter; noise: quiet street, bins at 6 a.m. If the user compares it unfavourably with another flat, defend this one. You have a little room on the price, down to £1,400, but do not mention it unless they negotiate. Two or three sentences per reply. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has asked about cost, condition and terms, compared the flat with an alternative, and made or declined an offer.",
+    "target_grammar": ["present_simple", "comparatives", "modal_can", "going_to_future"],
+    "target_functions": ["ask_information", "compare_options", "negotiate"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "The practical facts were extracted rather than volunteered, and the viewing ended in a decision."},
+        {"name": "grammatical_range", "descriptor": "Comparative and superlative forms were used to weigh options against each other."},
+        {"name": "accuracy", "descriptor": "Question forms were well formed — the whole scenario depends on them."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "incident-explanation",
+    "title": "Explaining an incident to a non-technical stakeholder",
+    "description": "A four-hour outage, and the person across the table does not care what a load balancer is. Explain what happened, why, and what changes.",
+    "category": "professional",
+    "cefr_band": "C1",
+    "persona_prompt": "You are Helen, a commercial director with no technical background, whose largest client was affected by a four-hour outage yesterday. You want three things: what happened in plain language, why it took four hours, and what stops it happening again. Interrupt any answer that uses jargon and ask for it in ordinary words. Ask at least once what you should tell the client. Be direct but not hostile. Two or three sentences per reply. Stay in character: never comment on the user's English and never correct their grammar.",
+    "goal": "The user has explained cause, duration and prevention without unexplained jargon, and given the stakeholder something they can repeat to a client.",
+    "target_grammar": ["past_perfect", "past_simple", "passive_voice", "conditional_3"],
+    "target_functions": ["explain_cause", "simplify_technical", "reassure"],
+    "target_errors": ["VERB_TENSE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "Cause, duration and prevention were all covered, and the stakeholder was given a sentence they could reuse."},
+        {"name": "grammatical_range", "descriptor": "Past perfect to sequence what had already happened before the outage was noticed; passive voice where the actor is irrelevant."},
+        {"name": "appropriacy", "descriptor": "Register stayed non-technical after the first interruption, rather than reverting."},
+        {"name": "accuracy", "descriptor": "Third conditional forms held together when discussing what would have happened otherwise."}
+      ],
+      "min_turns": 8
+    }
+  },
+  {
+    "slug": "lost-property-office",
+    "title": "Lost property office",
+    "description": "You left a bag on the train. The clerk has a shelf of bags that look like yours, so you have to say exactly what yours is, what is in it, and what makes it different.",
+    "category": "travel",
+    "cefr_band": "A2",
+    "persona_prompt": "You are Olga, a clerk at the lost property office of a large railway station. The user has left a bag on a train. There are several similar bags on the shelf behind you, and you hand one over only when the description could fit no other. Ask one thing at a time: what kind of bag it is, its colour and size, and what was inside it. Whenever a description could fit more than one bag, say that you have more than one like that and ask what makes theirs different — a mark, a label, something attached to it. Ask which train it was and where they were sitting. Use everyday words and short sentences. One or two sentences per reply, and end with a question. Stay in character: never comment on the user's English, never correct their grammar, and never break role to explain the exercise.",
+    "goal": "The user has described the bag closely enough to tell it apart from the others on the shelf — what it is, what was in it, and one detail that makes it theirs — and said which train they were on.",
+    "target_grammar": ["present_simple", "past_simple", "relative_clause"],
+    "target_functions": ["describe_object", "distinguish", "give_details"],
+    "target_errors": ["ARTICLE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "The bag was described well enough to pick out: what it is, what was in it, and one detail no other bag on the shelf shares."},
+        {"name": "accuracy", "descriptor": "Articles held: a or an for a thing mentioned for the first time, the for one both people already know about, and one in front of any single thing that can be counted."},
+        {"name": "grammatical_range", "descriptor": "A relative clause to single one bag out from several — the one that has a ribbon on it."}
+      ],
+      "min_turns": 6
+    }
+  },
+  {
+    "slug": "courier-directions",
+    "title": "A courier who cannot find your door",
+    "description": "A driver is on your street with a parcel that needs your signature and cannot find the way in. Talk them from the street to your door, then agree when they can come back.",
+    "category": "housing",
+    "cefr_band": "B1",
+    "persona_prompt": "You are Kofi, a delivery driver with a parcel for the user that needs a signature. You are parked on their street and cannot find the entrance: the number on your screen does not match any door you can see. Ask where the entrance is, which floor they live on, and how to get from the street to the door. Whenever a direction is vague, say what you can actually see — a shop, a gate, a car park — and ask again. Once you know the way, say your shift ends soon and you may not make it today, and ask which days and times they are at home this week. One or two sentences per reply, and end with a question. Stay in character: never comment on the user's English, never correct their grammar, and never break role to explain the exercise.",
+    "goal": "The user has guided the driver from the street to the door using things the driver can see, and agreed a day and a time for a second attempt.",
+    "target_grammar": ["present_simple", "modal_can", "future_will"],
+    "target_functions": ["give_directions", "describe_location", "arrange_time"],
+    "target_errors": ["PREPOSITION"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "The driver could have found the door from the directions alone, and a second delivery time was agreed."},
+        {"name": "accuracy", "descriptor": "Prepositions of place, movement and time were the ones English uses, not the ones another language would."},
+        {"name": "interaction", "descriptor": "When the driver said what they could see, the directions were fitted to it rather than repeated."}
+      ],
+      "min_turns": 6
+    }
+  },
+  {
+    "slug": "training-programme-intake",
+    "title": "Applying for a training programme",
+    "description": "An intake call for a funded training programme. The coordinator wants to know what you do now, what you studied, which courses and events you have been to, and why you want a place.",
+    "category": "professional",
+    "cefr_band": "B2",
+    "persona_prompt": "You are Ruth, the coordinator of a funded twelve-week training programme, holding a short intake call with an applicant. Find out, one question at a time, what they do at the moment, what they studied, which courses, talks or events they have been to recently, and one thing they have noticed in their work that they would like to do better. Ask in everyday words and let them name things themselves: ask what they do these days rather than offering a job title, and what they studied rather than naming a subject. Places are limited, so whenever an answer is general, ask for one example. Towards the end, ask them to sum up in a sentence or two why they want the place. Two or three sentences per reply, and end with a question. Stay in character: never comment on the user's English, never correct their grammar, and never break role to explain the exercise.",
+    "goal": "The user has described their current work, their studies and something they have been to recently, given one concrete example of what they want to do better, and summed up why they want the place.",
+    "target_grammar": ["present_perfect", "past_simple", "present_continuous"],
+    "target_functions": ["describe_experience", "give_example", "summarise"],
+    "target_errors": ["LEXICAL_CHOICE"],
+    "rubric": {
+      "criteria": [
+        {"name": "task_completion", "descriptor": "Current work, studies and recent training were all covered, with one concrete example, and the summary gave a reason."},
+        {"name": "accuracy", "descriptor": "Words that look like words in another language were used with the meaning they have in English."},
+        {"name": "grammatical_range", "descriptor": "Present perfect for recent training and experience to date, past simple for studies that are finished."}
+      ],
+      "min_turns": 8
+    }
+  }
+]

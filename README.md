@@ -50,3 +50,10 @@ bash -n upgrade.sh
 ## 智能制造课程设计
 
 页面内或新窗口打开AI五子棋案例。原始代码与ONNX模型从本服务器加载，推理运行库沿用源项目的jsDelivr依赖。详见course_assets/GOMOKU_SOURCE.md。当前对弈不自动计入课程成绩。
+
+
+## v1.4 英语对话
+
+机械工程专业英语已开放话题问答、慢速朗读、提示、历史记录与学习画像；可选本地语音识别。
+升级、启用语音、HTTPS和新闻源说明见 [UPGRADE-v1.4.md](UPGRADE-v1.4.md)。
+复用 MIT SpeakLab 的时序统计及情景素材，未接入发音评分。

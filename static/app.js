@@ -8,19 +8,20 @@ function modal(title,html){$('#modalTitle').textContent=title;$('#modalBody').in
 $('#closeModal').onclick=()=>$('#modal').close();
 $('#authToggle').onclick=()=>{reg=!reg;$('#nameLabel').hidden=!reg;$('#nameLabel input').required=reg;$('#registerNote').hidden=!reg;$('#authTitle').textContent=reg?'创建学生账号':'进入学习空间';$('#authDesc').textContent=reg?'填写姓名和学号，建立你的学习档案。':'使用学号登录，继续你的写作进程。';$('#authSubmit').textContent=reg?'注册学生账号 →':'登录学习空间 →';$('#authToggle').textContent=reg?'已有账号？返回登录':'还没有账号？学生注册';$('#loginForm [name=password]').minLength=reg?10:1};
 $('#loginForm').onsubmit=busy(async e=>{const x=Object.fromEntries(new FormData(e.target));if(reg){await api('/register','POST',x);toast('注册成功，请登录');$('#authToggle').click()}else{await api('/login','POST',{student_no:x.student_no,password:x.password});e.target.reset();await boot()}});
-$('#logout').onclick=busy(async()=>{await api('/logout','POST');user=null;$('#workspace').hidden=true;$('#auth').hidden=false;$('#loginForm').reset()});
+$('#logout').onclick=busy(async()=>{if(typeof englishCleanup==='function')englishCleanup();await api('/logout','POST');user=null;$('#workspace').hidden=true;$('#auth').hidden=false;$('#loginForm').reset()});
 $('#passwordBtn').onclick=()=>{modal('修改密码',`<form id="passwordForm"><label>原密码<input name="old" type="password" required autocomplete="current-password"></label><label>新密码（至少10位）<input name="new" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label><button class="primary">保存并重新登录</button></form>`);$('#passwordForm').onsubmit=busy(async e=>{await api('/password','POST',Object.fromEntries(new FormData(e.target)));$('#modal').close();user=null;$('#workspace').hidden=true;$('#auth').hidden=false;toast('密码已修改，请重新登录')})};
 const menu=[['overview','◫','学习概览'],['course','▤','课程课件'],['practice','✎','写作练习'],['assignments','▣','课程作业'],['grades','▥','学习成绩'],['profile','◎','学习档案']];
 const COURSES=[
  {id:'writing',title:'学术论文写作',subtitle:'Academic Writing',icon:'Aa',label:'课程已开放',description:'从研究问题、学术表达，到图表规范与论文修改。',state:'open'},
- {id:'english',title:'机械工程专业英语',subtitle:'English for Mechanical Engineering',icon:'En',label:'待建设',description:'专业阅读、工程术语与学术交流，课程内容待建设。',state:'planned'},
+ {id:'english',title:'机械工程专业英语',subtitle:'English for Mechanical Engineering',icon:'En',label:'英语对话已开放',description:'从感兴趣的话题开始，用简单英语对话，逐步建立口语学习画像。',state:'open'},
  {id:'equipment',title:'智能装备基础',subtitle:'Fundamentals of Intelligent Equipment',icon:'⚙',label:'待建设',description:'面向智能装备的知识学习与实践，课程内容待建设。',state:'planned'},
  {id:'design',title:'智能制造课程设计',subtitle:'Intelligent Manufacturing Design',icon:'◉',label:'实践案例已开放',description:'通过AI五子棋交互案例，探索智能决策与工程实践。',state:'open'}
 ];
 function renderNavigation(){
  const writingItems=user.role==='teacher'?[...menu,['students','♙','学生管理'],['review','✓','作业批改'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
  const course=COURSES.find(c=>c.id===activeCourse);
- const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
+ const englishItems=[['english','◉','话题对话'],['englishHistory','▤','对话记录'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishStudents','♙','英语练习档案'],['settings','⚙','AI 接口设置']]:[])];
+ const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
  $('#nav').innerHTML=items.map(([id,icon,name])=>`<button data-page="${id}">${icon}　${name}</button>`).join('');
  $('#nav').onclick=e=>{const b=e.target.closest('[data-page]');if(b){if(b.dataset.page==='portal')selectCourse(null);else show(b.dataset.page)}};
  $('#courseSelector').value=activeCourse||'';
@@ -32,7 +33,7 @@ async function selectCourse(id,target){
  activeCourse=COURSES.some(c=>c.id===id)?id:null;
  renderNavigation();
  if(typeof history!=='undefined')history.replaceState(null,'',activeCourse?'#'+activeCourse:'#courses');
- await show(target||(activeCourse==='writing'?'overview':activeCourse==='design'?'design':activeCourse?'placeholder':'portal'));
+ await show(target||(activeCourse==='writing'?'overview':activeCourse==='design'?'design':activeCourse==='english'?'english':activeCourse?'placeholder':'portal'));
 }
 async function boot(){
  try{user=await api('/me')}catch{return}
@@ -42,7 +43,7 @@ async function boot(){
  await selectCourse(COURSES.some(c=>c.id===requested)?requested:null);
 }
 function heading(title,desc,extra=''){return `<div class="page-heading"><div><h2>${title}</h2><p>${desc}</p></div>${extra}</div>`}
-async function show(id){page=id;const version=++renderVersion;$('#nav').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));const navItem=$('#nav [data-page="'+id+'"]');const title=navItem?navItem.textContent.trim().slice(1).trim():'课程首页';$('#breadcrumb').textContent=(activeCourse?COURSES.find(c=>c.id===activeCourse).title+' / ':'')+title;$('#content').innerHTML='<div class="loading">正在整理你的学习空间…</div>';try{let result=await views[id]();if(version!==renderVersion)return;$('#content').innerHTML=result.html;result.bind?.()}catch(e){if(version===renderVersion)$('#content').innerHTML=`<div class="empty">${esc(e.message)}<br><button id="retry">重试</button></div>`;$('#retry')?.addEventListener('click',()=>show(id))}}
+async function show(id){if(typeof englishCleanup==='function')englishCleanup();page=id;const version=++renderVersion;$('#nav').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));const navItem=$('#nav [data-page="'+id+'"]');const title=navItem?navItem.textContent.trim().slice(1).trim():'课程首页';$('#breadcrumb').textContent=(activeCourse?COURSES.find(c=>c.id===activeCourse).title+' / ':'')+title;$('#content').innerHTML='<div class="loading">正在整理你的学习空间…</div>';try{let result=await views[id]();if(version!==renderVersion)return;$('#content').innerHTML=result.html;result.bind?.()}catch(e){if(version===renderVersion)$('#content').innerHTML=`<div class="empty">${esc(e.message)}<br><button id="retry">重试</button></div>`;$('#retry')?.addEventListener('click',()=>show(id))}}
 const views={};
 views.portal=async()=>{
  const courses=await api('/courses');
@@ -82,4 +83,4 @@ function formalBlock(f){return `<div class="feedback"><b>形式预审：${({pass
 function openAppeal(sid){modal('申请教师复核',`<form id="appealForm"><label>你认为预审存在什么问题？<textarea name="reason" minlength="5" maxlength="2000" required placeholder="说明具体页码、预审意见及你的理由"></textarea></label><button class="primary">提交教师复核</button></form>`);$('#appealForm').onsubmit=busy(async e=>{await api('/submissions/'+sid+'/appeal','POST',Object.fromEntries(new FormData(e.target)));$('#modal').close();toast('已申请教师复核，当前稿件保留');show('assignments')})}
 views.usage=async()=>{const d=await api('/teacher/ai-usage');return {html:heading('AI 用量记录','按接口返回记录token用量；本地结果复用不再次请求模型。')+`<div class="stats"><div class="stat"><span>累计输入 tokens</span><strong>${d.totals.input_tokens}</strong></div><div class="stat"><span>累计输出 tokens</span><strong>${d.totals.output_tokens}</strong></div><div class="stat"><span>本地结果复用</span><strong>${d.totals.local_reuses}<small> 次</small></strong></div></div><div class="card table-wrap"><p class="small muted">实际费用以DeepSeek控制台账单为准。失败但已消耗的token在服务商未返回usage时可能无法记录。</p><table><thead><tr><th>时间</th><th>用途</th><th>模型</th><th>输入 / 输出</th><th>本地复用</th></tr></thead><tbody>${d.records.map(r=>`<tr><td>${esc(r.created)}</td><td>${esc(r.purpose)}</td><td>${esc(r.model)}</td><td>${r.input_tokens} / ${r.output_tokens}</td><td>${r.local_cache?'是':'否'}</td></tr>`).join('')}</tbody></table></div>`}};
 
-boot();
+document.addEventListener('DOMContentLoaded',boot);
