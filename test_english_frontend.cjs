@@ -16,6 +16,7 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  vm.runInContext('englishSession=fixtureSession;page="englishChat"',ctx);
  result=await vm.runInContext('views.englishChat()',ctx);result.bind();
  assert(result.html.includes('开始对话')&&result.html.includes('englishMicrophone'));
+ assert(result.html.includes('englishPersonRole')&&result.html.includes('englishPersonVoice'));
  for(const old of ['上传音频','确认并发送','录一句','慢速朗读','type="file"'])assert(!result.html.includes(old));
  assert(node('#englishStartCall').disabled&&node('#englishMicNote').textContent.includes('HTTPS'));
  ctx.tracksStopped=0;ctx.closed=0;
@@ -38,7 +39,8 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
   close(){this.connectionState='closed'}
  }
  ctx.RTCPeerConnection=Peer;
- ctx.fetch=async url=>({ok:true,json:async()=>url.endsWith('/connect')?{sdp:'v=0\r\nm=audio 9',expires:Date.now()/1000+300,session:{instructions:'Test configuration',modalities:['text','audio']}}:{ok:true}});
+ ctx.fetch=async (url,init)=>{if(url.endsWith('/connect')){const body=JSON.parse(init.body);assert(body.role==='engineer'&&body.voice==='Jennifer')}return {ok:true,json:async()=>url.endsWith('/connect')?{sdp:'v=0\r\nm=audio 9',expires:Date.now()/1000+300,session:{instructions:'Test configuration',modalities:['text','audio']}}:{ok:true}}};
+ node('#englishPersonRole').value='engineer';node('#englishPersonVoice').value='Jennifer';
  await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
  assert(sent[0].type==='session.update'&&sent[1].type==='response.create');assert(track.enabled);
  // Model failures remain visible to the teacher with sensitive strings redacted.

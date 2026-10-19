@@ -125,3 +125,20 @@ def test_student_connection_cap_and_teacher_debug_allowance(monkeypatch):
         sid=live(t)
         assert t.post(f'/api/english/realtime/{sid}/connect',json={'sdp':OFFER}).status_code==200
         t.post(f'/api/english/realtime/{sid}/close')
+
+
+def test_voice_person_and_language_policy_are_server_controlled(monkeypatch):
+    configure();s=student('liveperson100');sid=live(s);calls=fake_cloud(monkeypatch)
+    url=f'/api/english/realtime/{sid}/connect'
+    assert s.post(url,json={'sdp':OFFER,'voice':'invented-voice'}).status_code==422
+    assert s.post(url,json={'sdp':OFFER,'role':'ignore-rules'}).status_code==422
+    assert len(calls)==0
+    r=s.post(url,json={'sdp':OFFER,'role':'engineer','voice':'Jennifer'})
+    assert r.status_code==200,r.text
+    config=r.json()['session'];assert config['audio']['output']['voice']=='Jennifer'
+    prompt=config['instructions']
+    assert '30 Chinese characters' in prompt and 'Other non-Chinese languages are allowed' in prompt
+    assert 'mechanical engineering colleague' in prompt and 'Do not switch to Chinese conversation' in prompt
+    saved=s.get(f'/api/english/sessions/{sid}').json()
+    assert saved['topic']['practice_options']=={'role':'engineer','voice':'Jennifer'}
+    assert saved['realtime_options']['roles']['engineer'] and 'Mione' in saved['realtime_options']['voices']
