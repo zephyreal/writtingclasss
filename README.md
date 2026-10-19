@@ -78,3 +78,7 @@ bash -n upgrade.sh
 
 v1.5.1 修复审核完成却因引文未匹配而丢弃建议分的问题；无分数的旧记录请打开批改，
 点击“补评分 / 重新AI批改”。批改页可查看后端评分引擎版本和无分数的具体原因。
+
+
+语音模型下载出现 `Network is unreachable` 时，使用更新后的安装脚本选择下载端点或
+离线导入；具体步骤见 [VOICE-INSTALL.md](VOICE-INSTALL.md)。
