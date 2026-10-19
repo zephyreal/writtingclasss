@@ -20,7 +20,7 @@ const COURSES=[
 function renderNavigation(){
  const writingItems=user.role==='teacher'?[...menu,['students','♙','学生管理'],['review','✓','作业批改'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
  const course=COURSES.find(c=>c.id===activeCourse);
- const englishItems=[['english','◉','话题对话'],['englishHistory','▤','对话记录'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishStudents','♙','英语练习档案'],['settings','⚙','AI 接口设置']]:[])];
+ const englishItems=[['english','◉','话题对话'],['englishHistory','▤','对话记录'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishStudents','♙','英语练习档案'],['englishSettings','⚙','实时语音设置']]:[])];
  const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
  $('#nav').innerHTML=items.map(([id,icon,name])=>`<button data-page="${id}">${icon}　${name}</button>`).join('');
  $('#nav').onclick=e=>{const b=e.target.closest('[data-page]');if(b){if(b.dataset.page==='portal')selectCourse(null);else show(b.dataset.page)}};

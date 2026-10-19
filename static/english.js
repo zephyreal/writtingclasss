@@ -1,121 +1,168 @@
-'use strict';
-// Loaded after app.js; the main app owns authentication and course navigation.
-let englishSession=null, englishData=null, englishRecorder=null, englishStream=null, englishTimer=null, englishTranscription='', englishChunks=[], englishSending=false, englishAutoplay=true, englishAudioUrl=null, englishAudioContext=null, englishLevelTimer=null, englishMicDevice='';
+ 'use strict';
+// Shared platform login; API credentials never enter this file or browser storage.
+let englishSession=null,englishData=null,englishCall=null,englishEpoch=0,englishMicDevice='';
 const englishDate=x=>x?new Date(typeof x==='number'?x*1000:x).toLocaleString():'尚未同步';
+function englishStatus(text){const el=$('#englishLiveStatus');if(el)el.textContent=text}
 function englishCleanup(){
- if(englishRecorder?.state==='recording'){englishRecorder.onstop=null;englishRecorder.stop()}
- englishRecorder=null;englishStream?.getTracks().forEach(t=>t.stop());englishStream=null;
- clearTimeout(englishTimer);englishTranscription='';englishStopMeter();
- if(englishAudioUrl){$('#englishPlayback')?.pause?.();URL.revokeObjectURL(englishAudioUrl);englishAudioUrl=null}
- if(typeof speechSynthesis!=='undefined')speechSynthesis.cancel();
+ englishEpoch++;
+ const call=englishCall;englishCall=null;
+ if(!call)return;
+ call.closed=true;clearInterval(call.timer);clearTimeout(call.timeout);call.abort?.abort();
+ call.stream?.getTracks().forEach(t=>t.stop());
+ call.pc?.close();call.audio?.pause();if(call.audio)call.audio.srcObject=null;
+ // Close even during SDP exchange; backend rejects a connection that was cancelled.
+ fetch('/api/english/realtime/'+call.sid+'/close',{method:'POST',credentials:'same-origin',keepalive:true,headers:{'X-App-Request':'1'}}).catch(()=>{});
 }
-function englishStopMeter(){
- if(englishLevelTimer!==null){clearInterval(englishLevelTimer);englishLevelTimer=null}
- if(englishAudioContext){englishAudioContext.close().catch(()=>{});englishAudioContext=null}
+if(typeof window!=='undefined'){
+ window.addEventListener?.('pagehide',englishCleanup);
+ window.addEventListener?.('pageshow',()=>{if(englishCall&&Date.now()>englishCall.expires)englishStopCall('本次练习时间已到')});
+}
+async function englishStopCall(message='本次练习已结束'){
+ const call=englishCall;
+ englishCleanup();englishStatus(message);
+ const start=$('#englishStartCall');if(start){start.disabled=true;start.textContent='通话已结束'}
+ const end=$('#englishStopCall');if(end)end.disabled=true;
+ const mute=$('#englishMute');if(mute)mute.disabled=true;
+ if(call){try{await call.queue;await api('/english/realtime/'+call.sid+'/close','POST')}catch{toast('对话记录未完全保存，请稍后查看对话记录')}}
 }
 async function englishMicrophones(){
- if(typeof navigator==='undefined'||!navigator.mediaDevices?.enumerateDevices)return;
- try{const devices=await navigator.mediaDevices.enumerateDevices();const select=$('#englishMicrophone');if(!select||page!=='englishChat')return;
- select.innerHTML='<option value="">系统默认麦克风</option>'+devices.filter(d=>d.kind==='audioinput'&&d.deviceId).map((d,i)=>`<option value="${esc(d.deviceId)}">${esc(d.label||'麦克风 '+(i+1))}</option>`).join('');select.value=englishMicDevice;
+ if(!navigator.mediaDevices?.enumerateDevices)return;
+ try{const rows=await navigator.mediaDevices.enumerateDevices();const select=$('#englishMicrophone');if(!select)return;
+ select.innerHTML='<option value="">系统默认麦克风</option>'+rows.filter(d=>d.kind==='audioinput'&&d.deviceId).map((d,i)=>`<option value="${esc(d.deviceId)}">${esc(d.label||'麦克风 '+(i+1))}</option>`).join('');select.value=englishMicDevice;
  }catch{}
 }
-function englishStartMeter(stream){
- englishStopMeter();const C=typeof window!=='undefined'&&(window.AudioContext||window.webkitAudioContext);if(!C)return;
- try{const context=new C();englishAudioContext=context;context.resume().catch(()=>{});const analyser=context.createAnalyser();analyser.fftSize=1024;context.createMediaStreamSource(stream).connect(analyser);const values=new Float32Array(analyser.fftSize);
- englishLevelTimer=setInterval(()=>{analyser.getFloatTimeDomainData(values);const rms=Math.sqrt(values.reduce((n,v)=>n+v*v,0)/values.length);const meter=$('#englishMicLevel');if(meter)meter.value=Math.max(0,Math.min(100,(20*Math.log10(Math.max(rms,1e-8))+60)/60*100))},150);
- }catch{englishStopMeter()}
+function englishCaption(call,role,id,text,done=false){
+ if(!text)return;
+ const key=role+':'+id;let item=call.captions.get(key);
+ if(!item){item={role,text:''};call.captions.set(key,item)}
+ item.text=done?text:item.text+text;
+ const transcript=$('#englishCaptions');if(transcript){transcript.innerHTML=Array.from(call.captions.values()).slice(-40).map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('');transcript.scrollTop=transcript.scrollHeight}
+ if(done&&!call.saved.has(key)){
+  call.saved.add(key);
+  call.queue=call.queue.then(()=>api('/english/realtime/'+call.sid+'/transcript','POST',{item_id:String(id).slice(0,150),role,text:text.slice(0,4000)})).catch(()=>{const note=$('#englishSaveNote');if(note)note.textContent='部分对话文字未保存；语音通话仍可继续。'});
+ }
 }
-function englishAudioPreview(file){
- if(typeof URL==='undefined'||!URL.createObjectURL)return;
- if(englishAudioUrl)URL.revokeObjectURL(englishAudioUrl);englishAudioUrl=URL.createObjectURL(file);
- const audio=$('#englishPlayback');if(audio)audio.src=englishAudioUrl;const preview=$('#englishRecordingPreview');if(preview)preview.hidden=false;
+function englishSend(call,event){if(call.channel?.readyState==='open')call.channel.send(JSON.stringify(event))}
+function englishEvent(call,event,channel){
+ if(englishCall!==call||call.closed)return;
+ let data;try{data=JSON.parse(event.data)}catch{return}
+ if(data.type==='session.created'){
+  if(call.configured)return;call.configured=true;call.channel=channel;
+  const configure=()=>englishSend(call,{type:'session.update',session:call.config});
+  if(channel.readyState==='open')configure();else channel.addEventListener('open',configure,{once:true});
+ }else if(data.type==='session.updated'&&!call.ready){
+  call.ready=true;clearTimeout(call.timeout);
+  call.sender.replaceTrack(call.track).then(()=>{if(englishCall===call&&!call.closed){call.track.enabled=true;englishStatus('已连接，AI 先开口');englishSend(call,{type:'response.create'})}}).catch(()=>englishStopCall('麦克风连接失败，请重新开始'));
+  $('#englishStopCall').disabled=false;$('#englishMute').disabled=false;
+ }else if(data.type==='input_audio_buffer.speech_started'){
+  englishStatus('正在听你说…');
+  if(call.responding)englishSend(call,{type:'response.cancel'});
+ }else if(data.type==='input_audio_buffer.speech_stopped')englishStatus('正在回应…');
+ else if(data.type==='response.created'){call.responding=true;englishStatus('AI 正在说，可以直接插话')}
+ else if(data.type==='response.done'){call.responding=false;englishStatus('轮到你了，慢慢说')}
+ else if(data.type==='conversation.item.input_audio_transcription.completed')englishCaption(call,'student',data.item_id||data.event_id,data.transcript||data.text,true);
+ else if(data.type==='response.audio_transcript.delta')englishCaption(call,'assistant',data.item_id||data.response_id,data.delta);
+ else if(data.type==='response.audio_transcript.done')englishCaption(call,'assistant',data.item_id||data.response_id,data.transcript||data.text,true);
+ else if(data.type==='error'){
+  const code=data.error?.code||'';
+  if(/cancel.*(active|progress)|no_active_response/.test(code))return;
+  // Never show raw upstream payloads or server debug data.
+  englishStopCall('千问未能继续通话，请教师检查接口权限、音色和可用额度');
+ }
 }
-function englishSpeak(text){
- if(typeof speechSynthesis==='undefined'||typeof SpeechSynthesisUtterance==='undefined'){toast('此浏览器不支持朗读，可以换用 Chrome 或 Edge');return}
- speechSynthesis.cancel();const speech=new SpeechSynthesisUtterance(text);speech.lang='en-US';speech.rate=.85;
- const voice=speechSynthesis.getVoices().find(v=>/^en[-_]/i.test(v.lang));if(voice)speech.voice=voice;
- speech.onerror=()=>toast('朗读未成功，请检查设备声音或重试');speechSynthesis.speak(speech);
+async function englishIce(pc,call){
+ if(pc.iceGatheringState==='complete')return;
+ await new Promise((resolve,reject)=>{
+  const done=()=>{clearTimeout(timer);pc.removeEventListener('icegatheringstatechange',changed);call.abort.signal.removeEventListener('abort',cancel)};
+  const changed=()=>{if(pc.iceGatheringState==='complete'){done();resolve()}};
+  const cancel=()=>{done();reject(Error('通话已取消'))};
+  const timer=setTimeout(()=>{done();reject(Error('语音连接准备超时，请检查网络后重试'))},12000);
+  pc.addEventListener('icegatheringstatechange',changed);call.abort.signal.addEventListener('abort',cancel,{once:true});changed();
+ });
 }
-function englishMetrics(speech){
- if(!speech)return '<span class="small muted">文字回答 · 未测量语速、停顿或发音</span>';
- const m=speech.metrics;
- return `<div class="speech-metrics"><span>识别词数 <b>${esc(m.word_count)}</b></span><span>语速 <b>${m.speech_rate_wpm==null?'未测得':esc(m.speech_rate_wpm)+' 词/分'}</b></span><span>停顿占比 <b>${m.pause_ratio==null?'未测得':Math.round(m.pause_ratio*100)+'%'}</b></span></div><small class="muted">按原始识别时间戳统计 · 停顿阈值 300ms${speech.transcript_edited?' · 文字已修改，语音指标仍对应原识别结果':''}</small>`;
+async function englishStartCall(){
+ if(englishCall)return;
+ const epoch=++englishEpoch,sid=englishSession.id;
+ const call={sid,closed:false,queue:Promise.resolve(),captions:new Map(),saved:new Set(),abort:new AbortController(),expires:Infinity};englishCall=call;
+ const button=$('#englishStartCall');button.disabled=true;englishStatus('正在连接麦克风…');$('#englishStopCall').disabled=false;
+ try{
+  const stream=await navigator.mediaDevices.getUserMedia({audio:{...(englishMicDevice?{deviceId:{exact:englishMicDevice}}:{}),echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  if(epoch!==englishEpoch||englishCall!==call){stream.getTracks().forEach(t=>t.stop());return}
+  call.stream=stream;call.track=stream.getAudioTracks()[0];call.track.enabled=false;
+  englishMicrophones();$('#englishMicrophone').disabled=true;
+  const pc=new RTCPeerConnection({iceServers:[]});call.pc=pc;
+  pc.addTrack(call.track,stream);call.sender=pc.getSenders().find(s=>s.track?.kind==='audio');await call.sender.replaceTrack(null);
+  call.audio=$('#englishRemoteAudio');
+  pc.ontrack=e=>{if(englishCall!==call)return;call.audio.srcObject=e.streams[0]||new MediaStream([e.track]);call.audio.play().catch(()=>{$('#englishPlayAudio').hidden=false})};
+  const bind=channel=>{channel.onmessage=event=>englishEvent(call,event,channel)};
+  bind(pc.createDataChannel('oai-events'));pc.ondatachannel=e=>bind(e.channel);
+  pc.onconnectionstatechange=()=>{if(englishCall===call&&['failed','closed','disconnected'].includes(pc.connectionState))englishStopCall('连接已断开，请重新选择话题开始')};
+  await pc.setLocalDescription(await pc.createOffer());await englishIce(pc,call);
+  if(epoch!==englishEpoch)return;
+  englishStatus('正在连接英语伙伴…');
+  const response=await fetch('/api/english/realtime/'+sid+'/connect',{method:'POST',credentials:'same-origin',headers:{'X-App-Request':'1','Content-Type':'application/json'},body:JSON.stringify({sdp:pc.localDescription.sdp}),signal:call.abort.signal});
+  const result=await response.json();if(!response.ok)throw Error(result.detail||'实时语音连接失败');
+  if(epoch!==englishEpoch)return;
+  call.config=result.session;call.expires=result.expires*1000;
+  call.timer=setInterval(()=>{if(Date.now()>=call.expires){englishStopCall('本次练习时间已到，已保存对话');return}const clock=$('#englishClock');if(clock){const n=Math.max(0,Math.ceil((call.expires-Date.now())/1000));clock.textContent=Math.floor(n/60)+':'+String(n%60).padStart(2,'0')}},1000);
+  call.timeout=setTimeout(()=>englishStopCall('语音服务未能就绪，请检查接口配置或网络'),25000);
+  const sdp=String(result.sdp).trim().replace(/\r?\n/g,'\r\n')+'\r\n';
+  await pc.setRemoteDescription({type:'answer',sdp});
+ }catch(e){
+  if(epoch!==englishEpoch)return;
+  const message=({NotAllowedError:'请在浏览器站点权限中允许麦克风',NotFoundError:'未找到麦克风，请检查连接',OverconstrainedError:'所选麦克风不可用，请选择默认设备'})[e.name]||e.message;
+  await englishStopCall(message);toast(message);
+ }
 }
 views.english=async()=>{
  englishCleanup();const [d,p]=await Promise.all([api('/english/topics'),api('/english/profile')]);englishData=d;
- return {html:heading('开口聊一点，英语近一点','从一个感兴趣的话题开始。每次说一两句，也是在进步。')+
- `<section class="english-banner"><div><span class="eyebrow">SPEAK · LISTEN · TRY AGAIN</span><h2>今天，你想聊什么？</h2><p>${esc(p.recommendation)}</p><button id="englishProfile">设置我的兴趣 →</button></div><div class="english-orbit" aria-hidden="true">“ Hello. ”</div></section>`+
- `<div class="english-status"><span class="badge ${d.ai_configured?'':'warn'}">${d.ai_configured?'AI 对话接口已配置':'固定问答演示 · 待教师配置 AI'}</span><span class="badge ${d.speech_enabled?'':'warn'}">${d.speech_enabled?'本地语音识别已启用':'语音识别待启用 · 可先文字练习'}</span></div>`+
- `<div class="section-title"><div><h3>选一个话题，AI 先开口</h3><p class="small muted">近期话题来自新闻标题，适合聊想法；常用情景随时可练。</p></div>${user.role==='teacher'?'<button id="refreshEnglishNews">更新近期话题</button>':''}</div>`+
- `<div class="card news-status"><b>近期话题</b><p class="small">最近成功同步：${esc(englishDate(d.news.updated))} · 最近尝试：${esc(englishDate(d.news.checked))}</p>${d.news.stale?'<p class="small warning">同步已超过24小时或尚未同步，请留意新闻发布日期。</p>':''}${d.news.error?`<p class="small muted">${esc(d.news.error)}</p>`:''}<small class="muted">只读取标题和来源，不代表已阅读或核实新闻全文。不是热搜排行榜。</small></div>`+
- `<div class="english-filters" role="group" aria-label="话题分类"><button class="primary" data-english-filter="all">全部话题</button>${Object.entries(d.categories).map(([id,title])=>`<button data-english-filter="${id}">${esc(title)}</button>`).join('')}</div><div class="course-grid english-topics">${d.topics.map(t=>`<article class="card english-topic" data-english-category="${esc(t.category)}"><div class="card-top"><span class="badge ${t.kind==='news'?'':'warn'}">${t.kind==='news'?'近期话题':'常用情景'}</span><span class="small muted">${esc(d.categories[t.category])}</span></div><h3>${esc(t.title)}</h3>${t.english_title?`<p class="small muted">${esc(t.english_title)}</p>`:''}${t.kind==='news'?`<p class="small muted">${esc(t.source)} · ${esc(englishDate(t.published))}</p><a class="small" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">查看新闻来源 ↗</a>`:'<p class="small muted">短句问答 · 可随时查看句首提示</p>'}<button class="primary start-english" data-topic="${esc(t.id)}">开始聊聊 →</button></article>`).join('')}</div>`,bind(){
- $('#englishProfile').onclick=()=>show('englishProfile');
+ return {html:heading('用英语，聊聊你感兴趣的事','选一个话题，和 AI 连续对话。')+
+ `<section class="english-welcome"><div><span class="eyebrow">LET’S TALK</span><h2>今天，你想聊什么？</h2><p>${esc(p.recommendation)}</p></div><button id="englishProfile">我的兴趣</button></section>`+
+ (!d.realtime?.configured?`<p class="note">教师配置千问实时语音后即可开始。${user.role==='teacher'?'<button id="englishConfigure">配置语音 API</button>':''}</p>`:'')+
+ `<div class="english-filters"><button class="primary" data-english-filter="all">全部</button>${Object.entries(d.categories).map(([id,title])=>`<button data-english-filter="${id}">${esc(title)}</button>`).join('')}${user.role==='teacher'?'<button id="refreshEnglishNews">更新话题</button>':''}</div>`+
+ `<div class="course-grid english-topics">${d.topics.map(t=>`<article class="card english-topic" data-english-category="${esc(t.category)}"><span class="small muted">${esc(d.categories[t.category])}${t.kind==='news'?' · 近期话题':''}</span><h3>${esc(t.title)}</h3>${t.kind==='news'?`<a class="small muted" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.source)} · ${esc(englishDate(t.published))} ↗</a>`:'<p class="small muted">短句交流，AI 先开口</p>'}<button class="primary start-english" data-topic="${esc(t.id)}" ${d.realtime?.configured?'':'disabled'}>进入练习 →</button></article>`).join('')}</div>`+
+ `<details class="english-news-note"><summary>话题来源与更新</summary><p class="small muted">最近同步：${esc(englishDate(d.news.updated))}。${esc(d.news.error||'')} 新闻仅提供标题和来源，讨论观点时不代表已核实全文。${d.news.stale?'当前新闻缓存尚未更新，可先练习常用情景。':''}</p></details>`,bind(){
+ $('#englishProfile').onclick=()=>show('englishProfile');if($('#englishConfigure'))$('#englishConfigure').onclick=()=>show('englishSettings');
  document.querySelectorAll('[data-english-filter]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-english-filter]').forEach(x=>x.classList.toggle('primary',x===b));document.querySelectorAll('[data-english-category]').forEach(x=>x.hidden=b.dataset.englishFilter!=='all'&&x.dataset.englishCategory!==b.dataset.englishFilter)});
- document.querySelectorAll('[data-topic]').forEach(b=>b.onclick=busy(async()=>{b.disabled=true;try{englishSession=await api('/english/sessions','POST',{topic_id:b.dataset.topic});if(page!=='english')return;await show('englishChat');if(page==='englishChat'&&englishAutoplay&&typeof speechSynthesis!=='undefined')englishSpeak(englishSession.turns[0].text)}finally{b.disabled=false}}));
- if($('#refreshEnglishNews'))$('#refreshEnglishNews').onclick=busy(async()=>{const b=$('#refreshEnglishNews');b.disabled=true;b.textContent='正在同步…';try{await api('/english/news/refresh','POST');await show('english')}finally{b.disabled=false;b.textContent='更新近期话题'}});
+ document.querySelectorAll('[data-topic]').forEach(b=>b.onclick=busy(async()=>{b.disabled=true;try{const s=await api('/english/realtime/sessions','POST',{topic_id:b.dataset.topic});if(page!=='english')return;englishSession=s;await show('englishChat')}finally{b.disabled=false}}));
+ if($('#refreshEnglishNews'))$('#refreshEnglishNews').onclick=busy(async()=>{await api('/english/news/refresh','POST');await show('english')});
  }};
 };
 views.englishChat=async()=>{
  englishCleanup();if(!englishSession)return views.englishHistory();
- englishSession=await api('/english/sessions/'+englishSession.id);
- if(!englishData)englishData=await api('/english/topics');
- const s=englishSession,ended=!!s.ended;
- return {html:heading(esc(s.topic.title),`第 ${s.student_turns} / 20 轮 · ${s.mode==='stretch'?'尝试补充理由或例子':'简短问答，慢慢来'}`,`<button id="englishBack">← 话题列表</button>`)+
- `<div class="chat-layout"><section class="card english-chat" aria-label="英语对话记录">${s.turns.map(t=>`<article class="chat-turn ${t.role==='student'?'mine':'partner'}"><div class="chat-speaker">${t.role==='student'?'我':'AI 练习伙伴'}${t.role==='assistant'?`<button class="text-btn" data-speak-turn="${t.id}" aria-label="朗读这条回复">▶ 慢速朗读</button>`:''}</div><p class="chat-text">${esc(t.text)}</p>${t.role==='assistant'?`${t.details.notice?`<p class="small warning">${esc(t.details.notice)}</p>`:''}${(t.details.corrections||[]).length?`<details class="english-corrections"><summary>表达建议（AI，供参考）</summary>${t.details.corrections.map(c=>`<blockquote>${esc(c.quote)}</blockquote><p>${esc(c.suggestion)}</p><small>${esc(c.reason)}</small>`).join('')}</details>`:''}`:englishMetrics(t.details.speech)}</article>`).join('')}</section><aside class="card english-coach"><span class="eyebrow">YOUR PRACTICE SPACE</span><h3>先表达，再完善</h3><label class="english-auto-read"><input type="checkbox" id="englishAutoRead" ${englishAutoplay?'checked':''}>收到回复后自动慢速朗读</label><p>回答一两句就好。不知道怎么说时，试试句首提示。</p>${!ended?'<button id="englishHint">给我一点提示</button><div id="englishHintText" class="feedback" hidden></div>':''}<hr><p class="small muted">语速和停顿由识别时间戳计算，受转写误差影响。这里不生成发音分数，也不计入正式课程成绩。</p><p class="small muted">录音用于本地识别，处理后不保存音频。确认发送的文字、话题和近期对话会发给教师配置的 AI 接口；朗读由浏览器语音服务提供。</p></aside></div>`+
- (ended?'<div class="card"><h3>本次练习已结束</h3><p>完成至少3轮问答的对话会成为画像样本。</p><button id="englishReport">查看我的学习画像 →</button></div>':`<form id="englishTurnForm" class="card english-composer"><label for="englishAnswer">你的英语回答 <small>先转写确认，也可以直接输入</small></label><textarea id="englishAnswer" name="text" required maxlength="2000" rows="3" placeholder="I think… / In my project…"></textarea><div class="actions"><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label><span class="small">输入音量（非评分）<meter id="englishMicLevel" min="0" max="100" value="0"></meter></span><button type="button" id="englishRecord">● 录一句（最多60秒）</button><label class="audio-upload">上传音频<input id="englishAudio" type="file" accept="audio/*,.webm,.m4a,.mp3,.wav,.ogg"></label><button class="primary" id="englishSend" type="submit" ${s.student_turns>=20?'disabled':''}>确认并发送 →</button><button type="button" id="englishEnd">结束本次练习</button></div><div id="englishRecordingPreview" hidden><p class="small">回听刚才的录音，确认能清楚听到自己的声音。</p><audio id="englishPlayback" controls preload="metadata" style="max-width:100%;width:100%"></audio></div><p id="englishAudioStatus" class="small muted" role="status">音频不超过5 MB。识别结果可以修改，发送前请确认。</p><p id="englishMicNote" class="small warning" hidden></p></form>`),bind(){
- $('#englishBack').onclick=()=>show('english');$('#englishAutoRead').onchange=e=>{englishAutoplay=e.target.checked;if(!englishAutoplay&&typeof speechSynthesis!=='undefined')speechSynthesis.cancel()};
- document.querySelectorAll('[data-speak-turn]').forEach(b=>b.onclick=()=>englishSpeak(s.turns.find(t=>String(t.id)===b.dataset.speakTurn).text));
- if(ended){$('#englishReport').onclick=()=>show('englishProfile');return}
- $('#englishHint').onclick=busy(async()=>{const r=await api('/english/sessions/'+s.id+'/hint','POST');$('#englishHintText').textContent=r.hint;$('#englishHintText').hidden=false});
- $('#englishEnd').onclick=busy(async()=>{if(englishRecorder?.state==='recording'){toast('请先结束录音');return}if(englishSending){toast('请等待识别或当前回复完成');return}await api('/english/sessions/'+s.id+'/end','POST');toast('练习已保存');await show('englishProfile')});
- $('#englishTurnForm').onsubmit=busy(async e=>{if(englishRecorder?.state==='recording'){toast('请先结束录音并确认转写');return}if(englishSending)return;englishSending=true;$('#englishSend').disabled=true;
-  const body={text:$('#englishAnswer').value,transcription_id:englishTranscription,expected_turns:s.student_turns,request_id:typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2)};
-  try{const updated=await api('/english/sessions/'+s.id+'/turn','POST',body);if(page==='englishChat'&&englishSession?.id===s.id){englishSession=updated;await show('englishChat');if(englishAutoplay&&typeof speechSynthesis!=='undefined')englishSpeak(updated.turns[updated.turns.length-1].text)}}finally{englishSending=false;const b=$('#englishSend');if(b)b.disabled=false}
- });
+ const s=await api('/english/sessions/'+englishSession.id);englishSession=s;
+ const usable=s.transport==='realtime'&&!s.ended&&s.live_state?.state==='new';
+ return {html:heading(esc(s.topic.title),'简单说一两句，慢慢来。','<button id="englishBack">← 换个话题</button>')+
+ `<section class="card english-call"><div class="english-voice-orb" aria-hidden="true">En</div><h2 id="englishLiveStatus" role="status">${usable?'准备好了，就开始吧':'本次练习记录'}</h2><p class="muted">${usable?'AI 先开口 · 可以随时插话':'选择一个话题，开始新的语音练习'}</p><span id="englishClock" class="english-clock"></span><audio id="englishRemoteAudio" autoplay></audio><button id="englishPlayAudio" hidden>播放 AI 声音</button>`+
+ (usable?`<div class="english-call-actions"><button class="primary" id="englishStartCall">开始对话</button><button id="englishMute" disabled>静音</button><button id="englishStopCall" disabled>结束</button><button id="englishHint">给我提示</button></div><p id="englishHintText" class="small" hidden></p><details class="english-device"><summary>麦克风设置</summary><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label></details><p id="englishMicNote" class="small warning"></p>`:'<button id="englishNewTopic">选择话题</button>')+
+ `<details class="english-transcript"><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('')}</div></details><p id="englishSaveNote" class="small muted"></p><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
+ $('#englishBack').onclick=()=>show('english');
+ if(!usable){$('#englishNewTopic').onclick=()=>show('english');return}
  const secure=typeof window!=='undefined'&&window.isSecureContext;
- const available=typeof navigator!=='undefined'&&navigator.mediaDevices?.getUserMedia&&typeof MediaRecorder!=='undefined';
- if(!englishData.speech_enabled||!secure||!available){$('#englishRecord').disabled=true;$('#englishMicNote').hidden=false;$('#englishMicNote').textContent=!englishData.speech_enabled?'教师需先启用服务器语音识别。当前可以文字练习。':!secure?'当前公网 HTTP 页面不能调用麦克风。启用 HTTPS 后可直接录音；现在可上传已有音频。':'此浏览器不支持网页录音，请上传已有音频。'}
- if(!englishData.speech_enabled)$('#englishAudio').disabled=true;
+ const supported=typeof RTCPeerConnection!=='undefined'&&navigator.mediaDevices?.getUserMedia;
+ if(!secure||!supported){$('#englishStartCall').disabled=true;$('#englishMicNote').textContent=!secure?'请通过 HTTPS 打开网站并允许麦克风。':'当前浏览器不支持实时语音，请使用新版 Chrome 或 Edge。'}
+ $('#englishStartCall').onclick=busy(englishStartCall);$('#englishStopCall').onclick=busy(()=>englishStopCall());
+ $('#englishMute').onclick=()=>{const call=englishCall;if(!call?.track||!call.ready)return;call.track.enabled=!call.track.enabled;$('#englishMute').textContent=call.track.enabled?'静音':'取消静音';englishStatus(call.track.enabled?'正在听你说…':'已静音')};
+ $('#englishPlayAudio').onclick=busy(async()=>{await $('#englishRemoteAudio').play();$('#englishPlayAudio').hidden=true});
+ $('#englishHint').onclick=busy(async()=>{const r=await api('/english/sessions/'+s.id+'/hint','POST');$('#englishHintText').textContent=r.hint;$('#englishHintText').hidden=false});
  $('#englishMicrophone').onchange=e=>englishMicDevice=e.target.value;englishMicrophones();
- $('#englishAudio').onchange=busy(async e=>{const f=e.target.files[0];if(f)await englishUploadAudio(f,s.id);e.target.value=''});
- $('#englishRecord').onclick=busy(async()=>{
-  if(englishRecorder?.state==='recording'){englishRecorder.stop();return}
-  if(englishSending)return;
-  $('#englishRecord').disabled=true;
-  if(typeof speechSynthesis!=='undefined')speechSynthesis.cancel();$('#englishPlayback')?.pause?.();
-  let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:{...(englishMicDevice?{deviceId:{exact:englishMicDevice}}:{}),echoCancellation:true,noiseSuppression:true,autoGainControl:true}})}catch(e){throw Error(({NotAllowedError:'浏览器未允许麦克风，请在该站点权限中选择允许。',NotFoundError:'没有找到可用麦克风，请检查设备连接。',OverconstrainedError:'所选麦克风不可用，请切换到系统默认麦克风。'})[e.name]||e.message)}finally{if($('#englishRecord'))$('#englishRecord').disabled=false}
-  // Navigation during the permission dialog must not leave an open microphone.
-  if(page!=='englishChat'||englishSession?.id!==s.id){stream.getTracks().forEach(t=>t.stop());return}
-  englishStream=stream;englishStartMeter(stream);englishMicrophones();$('#englishMicrophone').disabled=true;
-  try{
-   const type=['audio/webm;codecs=opus','audio/mp4','audio/webm'].find(t=>MediaRecorder.isTypeSupported(t));
-   const recorder=new MediaRecorder(englishStream,type?{mimeType:type}:{});englishRecorder=recorder;englishChunks=[];
-   recorder.ondataavailable=e=>{if(e.data.size)englishChunks.push(e.data)};
-   recorder.onerror=()=>{englishCleanup();toast('录音失败，请检查麦克风权限')};
-   recorder.onstop=async()=>{clearTimeout(englishTimer);englishStopMeter();if($('#englishMicrophone'))$('#englishMicrophone').disabled=false;englishStream?.getTracks().forEach(t=>t.stop());englishStream=null;englishRecorder=null;const b=$('#englishRecord');if(b)b.textContent='● 录一句（最多60秒）';try{await englishUploadAudio(new Blob(englishChunks,{type:recorder.mimeType}),s.id)}catch(e){toast(e.message)}};
-   recorder.start(1000);$('#englishRecord').textContent='■ 结束录音并转写';$('#englishAudioStatus').textContent='录音中…当前设备：'+(stream.getAudioTracks()[0]?.label||'默认麦克风')+'。说话时输入音量条应有变化。';englishTimer=setTimeout(()=>{if(recorder.state==='recording')recorder.stop()},60000);
-  }catch(e){englishCleanup();throw e}
- });
- $('#englishAnswer').focus?.();
  }};
 };
-async function englishUploadAudio(file,sid){
- if(englishSending)return;if(englishRecorder?.state==='recording')throw Error('请先结束当前录音');if(file.size>5000000)throw Error('音频不能超过5 MB');
- englishAudioPreview(file);englishTranscription='';englishSending=true;const status=$('#englishAudioStatus'),send=$('#englishSend'),record=$('#englishRecord'),recordDisabled=record?.disabled;
- if(send)send.disabled=true;if(record)record.disabled=true;if(status)status.textContent='正在本地识别…请稍候，先不要发送。';
- try{const form=new FormData();form.append('file',file,'answer.audio');const r=await api('/english/transcribe','POST',form);
-  if(page!=='englishChat'||englishSession?.id!==sid)return;
-  englishTranscription=r.transcription_id;$('#englishAnswer').value=r.text;$('#englishAudioStatus').textContent='识别完成。请检查文字后点击“确认并发送”；修改文字不会改写原录音指标。'+(r.warnings?.length?' '+r.warnings.join(' '):'');
- }catch(e){if(status)status.textContent=e.message+' 请先用上面的播放器回听这段录音。';throw e}
- finally{englishSending=false;if(send)send.disabled=false;if(record)record.disabled=recordDisabled}
-}
 views.englishHistory=async()=>{
  englishCleanup();const rows=await api('/english/sessions');
- return {html:heading('我的对话记录','继续未完成的练习，或回看以前的表达。')+`<section class="card table-wrap"><table><thead><tr><th>话题</th><th>开始时间</th><th>回答轮数</th><th>状态</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.topic.title)}</td><td>${esc(englishDate(s.created))}</td><td>${s.turns}</td><td>${s.ended?'已结束':'可继续'}</td><td><button data-resume-english="${s.id}">${s.ended?'回看':'继续'} →</button></td></tr>`).join('')}</tbody></table>${!rows.length?'<div class="empty">还没有练习记录，从一个简单话题开始吧。</div>':''}</section>`,bind(){document.querySelectorAll('[data-resume-english]').forEach(b=>b.onclick=busy(async()=>{englishSession={id:Number(b.dataset.resumeEnglish)};await show('englishChat')}))}};
+ return {html:heading('我的对话记录','回看练习文字，下一次继续进步。')+`<section class="card table-wrap"><table><thead><tr><th>话题</th><th>时间</th><th>回答轮数</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.topic.title)}</td><td>${esc(englishDate(s.created))}</td><td>${s.turns}</td><td><button data-resume-english="${s.id}">查看 →</button></td></tr>`).join('')}</tbody></table>${!rows.length?'<p class="empty">还没有练习记录，选个话题开始吧。</p>':''}</section>`,bind(){document.querySelectorAll('[data-resume-english]').forEach(b=>b.onclick=busy(async()=>{englishSession={id:Number(b.dataset.resumeEnglish)};await show('englishChat')}))}};
+};
+views.englishSettings=async()=>{
+ englishCleanup();const s=await api('/teacher/english/realtime-settings');
+ return {html:heading('英语实时语音 API','千问负责连续语音对话，论文批改接口在原设置中单独管理。')+
+ `<section class="card english-api-settings"><span class="badge">${s.configured?'已保存配置':'待配置'}</span><h3>阿里云百炼 · 千问实时语音</h3><form id="englishApiForm"><label>模型<input value="${esc(s.model)}" readonly></label><label>地域<select name="region"><option value="cn-beijing" ${s.region==='cn-beijing'?'selected':''}>华北2（北京）</option><option value="ap-southeast-1" ${s.region==='ap-southeast-1'?'selected':''}>新加坡</option></select></label><label>业务空间 ID（Workspace ID）<input name="workspace_id" required maxlength="80" pattern="[A-Za-z0-9_-]+" value="${esc(s.workspace_id)}" placeholder="填写百炼业务空间 ID"></label><label>API Key<input name="key" type="password" autocomplete="new-password" maxlength="500" placeholder="${s.configured?'已保存，留空保留原密钥':'填写所选地域和业务空间的 API Key'}"></label><label>音色<input name="voice" required value="${esc(s.voice)}" maxlength="100" pattern="[A-Za-z0-9_-]+"></label><label>单次练习上限（分钟）<input name="minutes" type="number" required min="1" max="15" value="${s.minutes}"></label><p class="small muted">API Key 只保存在服务器。每账号每天最多尝试连接6次；网页到时或离开时关闭通话。模型费用按实际用量计费，费用上限请同时在百炼控制台管理。</p><button class="primary">保存语音配置</button><button type="button" id="englishTestCall">去试一次对话</button><details><summary>清除密钥</summary><label><input type="checkbox" name="clear_key">保存时清除现有密钥并停用新通话</label></details></form><p class="small muted">业务空间 ID、API Key 和模型权限必须属于所选地域。默认音色 Tina，可填写该模型官方支持的其他音色标识。试聊会产生实际模型费用。</p></section>`,bind(){
+ $('#englishApiForm').onsubmit=busy(async e=>{const body=Object.fromEntries(new FormData(e.target));body.minutes=Number(body.minutes);body.clear_key=body.clear_key==='on';await api('/teacher/english/realtime-settings','POST',body);toast('实时语音配置已保存');await show('englishSettings')});
+ $('#englishTestCall').onclick=()=>show('english');
+ }};
 };
 function englishProfileHtml(p){
  const rates=p.recent_speech.filter(m=>m.speech_rate_wpm!=null);
- return `<div class="stats"><div class="stat"><span>有效对话样本</span><strong>${p.completed_samples}<small> 次</small></strong></div><div class="stat"><span>回答 / 语音回答</span><strong>${p.practice_turns}<small> / ${p.spoken_turns}</small></strong></div><div class="stat"><span>平均回答词数</span><strong>${p.average_words??'—'}</strong></div></div><div class="card"><h3>下一次怎么练？</h3><p>${esc(p.recommendation)}</p><p class="small muted">${esc(p.measurement_note)}</p><p>近期常练兴趣：${p.inferred_interests.map(x=>esc(p.categories[x])).join('、')||'样本积累中'}</p></div><div class="card table-wrap" style="margin-top:20px"><h3>最近语音记录</h3><p class="small muted">按每段识别语音统计；更快不代表更好。不同话题、录音条件和识别误差都会影响指标。</p>${rates.length?`<table><thead><tr><th>时间</th><th>识别词数</th><th>语速（词/分）</th><th>停顿占比</th></tr></thead><tbody>${rates.map(m=>`<tr><td>${esc(englishDate(m.created))}</td><td>${m.word_count}</td><td>${m.speech_rate_wpm}</td><td>${m.pause_ratio==null?'—':Math.round(m.pause_ratio*100)+'%'}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">还没有可测量的语音样本。文字练习不产生语速或停顿数据。</p>'}</div>`;
+ return `<div class="stats"><div class="stat"><span>有效对话样本</span><strong>${p.completed_samples}<small> 次</small></strong></div><div class="stat"><span>回答 / 语音回答</span><strong>${p.practice_turns}<small> / ${p.spoken_turns}</small></strong></div><div class="stat"><span>平均回答词数</span><strong>${p.average_words??'—'}</strong></div></div><div class="card"><h3>下一次怎么练？</h3><p>${esc(p.recommendation)}</p><p class="small muted">${esc(p.measurement_note)}</p><p>近期常练兴趣：${p.inferred_interests.map(x=>esc(p.categories[x])).join('、')||'样本积累中'}</p></div><div class="card table-wrap" style="margin-top:20px"><h3>最近语音记录</h3><p class="small muted">历史录音的时间戳统计；实时通话只保存对话文字。不同话题、录音条件和识别误差都会影响指标。</p>${rates.length?`<table><thead><tr><th>时间</th><th>识别词数</th><th>语速（词/分）</th><th>停顿占比</th></tr></thead><tbody>${rates.map(m=>`<tr><td>${esc(englishDate(m.created))}</td><td>${m.word_count}</td><td>${m.speech_rate_wpm}</td><td>${m.pause_ratio==null?'—':Math.round(m.pause_ratio*100)+'%'}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">还没有可测量的语音样本。实时对话不生成语速、停顿或发音分数。</p>'}</div>`;
 }
 views.englishProfile=async()=>{
  englishCleanup();const p=await api('/english/profile');

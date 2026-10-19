@@ -1,3 +1,5 @@
+> 本文仅适用于旧版本本地识别。当前实时语音请看 [ENGLISH_REALTIME.md](ENGLISH_REALTIME.md)，不需要运行本脚本。
+
 # 语音安装：模型下载网络失败
 
 网页显示“教师需先启用服务器语音识别”，安装日志含 Hugging Face

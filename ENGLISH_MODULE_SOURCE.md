@@ -16,3 +16,10 @@
 `1c512d17d388c2b6bc589381faa9220f6be68f50` 同步：`english_speech.py`、
 `static/english.js`、`test_english_frontend.cjs`、`test_english_speech.py`、
 `VOICE-INSTALL.md` 和 `vendor/speaklab/SOURCE.md`。
+
+2026-10-19：千问原生实时语音从英语仓库经过集成检查的提交
+`7c37fa7dd704b610f6795620a70a7653250b235a` 同步：
+`english_course.py`、`static/english.js`、`static/english.css`、
+`test_english_frontend.cjs`、`test_english_realtime.py`。
+API接入说明发布为 `ENGLISH_REALTIME.md`。课程平台补充实时语音设置导航和样式引用，
+保留统一账号、论文接口及原部署方式；旧本地识别脚本不再需要。
