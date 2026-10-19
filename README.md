@@ -1,0 +1,48 @@
+# 研写 · 研究生论文写作课程平台 v1.2
+
+学生注册与学习档案、课程PPT/PDF、个性化练习、5MB论文上传、DeepSeek图文形式预审、自动退回与人工复核、教师评分及成绩导出。
+
+- **已有网站升级**：按 `UPGRADE-v1.2.md` 执行 `bash upgrade.sh`。保留现有账号、作业、课件和成绩。
+- **第一次安装**：Ubuntu root终端运行 `bash install.sh`，安装时自行设置教师密码，默认账号teacher。
+- **GitHub托管**：参阅 `GITHUB.md`。代码与学生数据分开，仓库建议设为私有。
+- **AI接口**：https://api.deepseek.com，模型deepseek-flash，密钥仅在服务器后台配置。真实API待配置后联调。
+- **先测试**：当前HTTP站点先使用测试账号和测试稿；正式教学前配置HTTPS。
+
+## 运行位置
+
+程序：`/opt/writing-class`；数据和密钥：`/var/lib/writing-class`；服务：`writing-class`；反向代理：Nginx。应用监听127.0.0.1:8000，不需对公网开放该端口。运行时使用独立的writingclass系统用户，单worker串行处理AI预审。
+
+## 日常检查
+
+```bash
+systemctl status writing-class --no-pager
+journalctl -u writing-class -n 60 --no-pager
+curl http://127.0.0.1:8000/healthz
+```
+
+上传PPT/PPTX供学生下载，另传对应PDF可在线阅读。教师课件上限50MiB，学生论文不超过5MB。学生提交Word请用docx，不支持旧doc。自动预审20页以内；超过或解析失败由教师处理。两核2GB建议先小规模试用，正式并发能力待压测。
+
+练习使用统一24题，每题首次作答计分，未答计0，巩固和AI拓展不改首次成绩。掌握度用于推荐而非最终评分。教师可以发布作业、下载原文、查看AI报告、退回、恢复人工复核、发布成绩与导出CSV。
+
+## 本地验证
+
+```bash
+python -m pip install -r requirements.txt pytest
+python -m pytest -q test_app.py
+node --check static/app.js
+node test_frontend.cjs
+bash -n install.sh
+bash -n upgrade.sh
+```
+
+本地PDF/Word渲染测试需要LibreOffice；未安装时Word真实转换测试跳过。旧版本迁移测试需要上一级目录的writing-class-v1.zip。本次交付已执行包含真实Word/PDF转换和旧版迁移的完整19项测试。无真实API凭证时测试用模拟响应，不产生模型费用。
+
+## 备份与数据保护
+
+升级脚本会短暂停站，将旧代码和完整数据目录备份到/root/course-backups。日常还应将数据库、上传文件与AI配置定期备份到受控的服务器外位置。备份含学生论文和API密钥，限制访问。不要把数据目录或备份上传到GitHub或作为静态网站目录公开。
+
+正式配置HTTPS后，在/etc/systemd/system/writing-class.service设置Environment=COOKIE_SECURE=true，执行systemctl daemon-reload和systemctl restart writing-class。不要在仅HTTP时启用secure cookie。
+
+## 当前边界
+
+本版单课程、固定示例题库；无在线题库编辑、班级分组、邮件找回、在线支付或经过标注验证的自动评分模型。形式预审是助教工具，争议可由教师纠正。AI不核验实验数据、参考文献真实性和研究创新性。后台队列在进程内，重启中断任务后可重新触发。
