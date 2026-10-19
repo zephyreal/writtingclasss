@@ -138,6 +138,7 @@ def test_voice_person_and_language_policy_are_server_controlled(monkeypatch):
     config=r.json()['session'];assert config['audio']['output']['voice']=='Jennifer'
     prompt=config['instructions']
     assert '30 Chinese characters' in prompt and 'Other non-Chinese languages are allowed' in prompt
+    assert 'GUIDED CONVERSATION STYLE' in prompt and 'offer two simple choices' in prompt
     assert 'mechanical engineering colleague' in prompt and 'Do not switch to Chinese conversation' in prompt
     saved=s.get(f'/api/english/sessions/{sid}').json()
     assert saved['topic']['practice_options']=={'role':'engineer','voice':'Jennifer'}

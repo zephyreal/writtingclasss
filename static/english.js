@@ -22,7 +22,7 @@ async function englishStopCall(message='本次练习已结束'){
  englishCleanup();englishStatus(message);
  const start=$('#englishStartCall');if(start){start.disabled=true;start.textContent='通话已结束'}
  const end=$('#englishStopCall');if(end)end.disabled=true;
- const mute=$('#englishMute');if(mute)mute.disabled=true;
+ const mute=$('#englishMute');if(mute)mute.disabled=true;const guide=$('#englishGuide');if(guide)guide.disabled=true;
  if(call){try{await call.queue;await api('/english/realtime/'+call.sid+'/close','POST')}catch{toast('对话记录未完全保存，请稍后查看对话记录')}}
 }
 async function englishMicrophones(){
@@ -56,6 +56,17 @@ function englishSend(call,event){
  if(event.type==='response.cancel')call.cancelEvent=id;
  call.channel.send(JSON.stringify({event_id:id,...event}));
 }
+function englishGuideAvailability(call){
+ const button=$('#englishGuide');
+ if(button)button.disabled=!call?.ready||!!(call.responding||call.speaking||call.awaitingResponse||call.openingPending||call.guidePending||call.closed);
+}
+function englishGuideCall(){
+ const call=englishCall;
+ if(!call?.ready||call.closed||call.responding||call.speaking||call.awaitingResponse||call.openingPending||call.guidePending)return;
+ if(call.channel?.readyState!=='open')return;
+ call.guidePending=true;englishGuideAvailability(call);englishStatus('让 AI 带你聊一会儿…');
+ englishSend(call,{type:'response.create',response:{instructions:'The learner pressed the lead-the-conversation button. Continue from the actual conversation context and take the conversational lead. In the current non-Chinese practice language, offer an interesting observation or a clearly hypothetical mini-scene in 3-5 simple sentences, then give ONE easy choice question or sentence starter. Be warm and encouraging, with no demand for a long answer. Follow the session language limits and selected role. Do not invent a student answer or repeat the opening greeting.'}});
+}
 function englishLiveFailure(call,error={},stage){
  if(englishCall!==call||call.closed)return;
  const code=englishSafeDiagnostic(error.code||error.type||'unknown_error');
@@ -70,7 +81,7 @@ function englishLiveFailure(call,error={},stage){
  const emptyOpening=/cannot create response without input, history, or instructions/i.test(String(error.message||''));
  if(call.ready&&call.openingPending&&emptyOpening){
   call.openingPending=false;call.responding=false;
-  englishStatus('已连接，请先说一句 Hello 开始对话');
+  englishStatus('已连接，请先说一句 Hello，或点“带我聊”');englishGuideAvailability(call);
   return;
  }
  const details=['阶段：'+(stage||call.phase||'建立会话'),'错误码：'+code,param?'参数：'+param:'','说明：'+message].filter(Boolean).join('\n');
@@ -88,15 +99,15 @@ function englishEvent(call,event,channel){
   if(channel.readyState==='open')configure();else channel.addEventListener('open',configure,{once:true});
  }else if(data.type==='session.updated'&&!call.ready){
   call.ready=true;clearTimeout(call.timeout);
-  call.sender.replaceTrack(call.track).then(()=>{if(englishCall===call&&!call.closed){call.track.enabled=true;englishStatus('已连接，AI 先开口');call.openingPending=true;englishSend(call,{type:'response.create',response:{instructions:'Begin this English practice now. Greet the student briefly and ask ONE simple opening question about the topic in the session context. Say only the greeting and question; do not describe these instructions.'}})}}).catch(()=>englishStopCall('麦克风连接失败，请重新开始'));
+  call.sender.replaceTrack(call.track).then(()=>{if(englishCall===call&&!call.closed){call.track.enabled=true;englishStatus('已连接，AI 先开口');call.openingPending=true;englishSend(call,{type:'response.create',response:{instructions:'Begin this practice now. In English, greet the learner warmly, introduce a relatable topic hook or clearly hypothetical mini-scene in 3-4 easy sentences, then offer ONE simple choice question. Carry the opening so the learner can answer briefly. Follow the selected role and language rules; do not describe these instructions.'}})}}).catch(()=>englishStopCall('麦克风连接失败，请重新开始'));
   $('#englishStopCall').disabled=false;$('#englishMute').disabled=false;
  }else if(data.type==='input_audio_buffer.speech_started'){
-  englishStatus('正在听你说…');
+  call.speaking=true;call.awaitingResponse=false;englishGuideAvailability(call);englishStatus('正在听你说…');
   if(call.responding){call.responding=false;englishSend(call,{type:'response.cancel'})}
- }else if(data.type==='input_audio_buffer.speech_stopped')englishStatus('正在回应…');
- else if(data.type==='response.created'){call.openingPending=false;call.responding=true;englishStatus('AI 正在说，可以直接插话')}
+ }else if(data.type==='input_audio_buffer.speech_stopped'){call.speaking=false;call.awaitingResponse=true;englishGuideAvailability(call);englishStatus('正在回应…')}
+ else if(data.type==='response.created'){call.openingPending=false;call.guidePending=false;call.awaitingResponse=false;call.responding=true;englishGuideAvailability(call);englishStatus('AI 正在说，可以直接插话')}
  else if(data.type==='response.done'){
-  call.responding=false;
+  call.responding=false;call.awaitingResponse=false;call.guidePending=false;englishGuideAvailability(call);
   if(data.response?.status==='failed'){englishLiveFailure(call,data.response.status_details?.error||{code:'response_failed'},'response.done');return}
   englishStatus(data.response?.status==='cancelled'?'正在听你说…':'轮到你了，慢慢说');
  }
@@ -169,16 +180,16 @@ views.englishChat=async()=>{
  const s=await api('/english/sessions/'+englishSession.id);englishSession=s;
  const usable=s.transport==='realtime'&&!s.ended&&s.live_state?.state==='new';
  const options=s.realtime_options||{roles:{partner:'友好聊天伙伴'},voices:{Tina:'Tina · 温暖'}};
- return {html:heading(esc(s.topic.title),'简单说一两句，慢慢来。','<button id="englishBack">← 换个话题</button>')+
+ return {html:heading(esc(s.topic.title),'不用找话题，AI 带你聊；回答一两句也可以。','<button id="englishBack">← 换个话题</button>')+
  `<section class="card english-call"><div class="english-voice-orb" aria-hidden="true">En</div><h2 id="englishLiveStatus" role="status">${usable?'准备好了，就开始吧':'本次练习记录'}</h2><p class="muted">${usable?'AI 先开口 · 可以随时插话':'选择一个话题，开始新的语音练习'}</p><span id="englishClock" class="english-clock"></span><audio id="englishRemoteAudio" autoplay></audio><button id="englishPlayAudio" hidden>播放 AI 声音</button>`+
- (usable?`<div class="english-person-options"><label>对话人员<select id="englishPersonRole">${Object.entries(options.roles).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonRole?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>声音<select id="englishPersonVoice"><option value="">教师默认音色</option>${Object.entries(options.voices).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonVoice?'selected':''}>${esc(label)}</option>`).join('')}</select></label></div><p class="small muted">默认练英语，也可要求练习其他外语；中文仅用于简短词义或语法解释。</p><div class="english-call-actions"><button class="primary" id="englishStartCall">开始对话</button><button id="englishMute" disabled>静音</button><button id="englishStopCall" disabled>结束</button><button id="englishHint">给我提示</button></div><p id="englishHintText" class="small" hidden></p><details class="english-device"><summary>麦克风设置</summary><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label></details><p id="englishMicNote" class="small warning"></p>`:'<button id="englishNewTopic">选择话题</button>')+
+ (usable?`<div class="english-person-options"><label>对话人员<select id="englishPersonRole">${Object.entries(options.roles).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonRole?'selected':''}>${esc(label)}</option>`).join('')}</select></label><label>声音<select id="englishPersonVoice"><option value="">教师默认音色</option>${Object.entries(options.voices).map(([id,label])=>`<option value="${esc(id)}" ${id===englishPersonVoice?'selected':''}>${esc(label)}</option>`).join('')}</select></label></div><p class="small muted">默认练英语，也可要求练习其他外语；中文仅用于简短词义或语法解释。</p><div class="english-call-actions"><button class="primary" id="englishStartCall">开始对话</button><button id="englishMute" disabled>静音</button><button id="englishStopCall" disabled>结束</button><button id="englishGuide" disabled>带我聊</button><button id="englishHint">给我提示</button></div><p id="englishHintText" class="small" hidden></p><details class="english-device"><summary>麦克风设置</summary><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label></details><p id="englishMicNote" class="small warning"></p>`:'<button id="englishNewTopic">选择话题</button>')+
  `<details class="english-transcript"><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('')}</div></details><p id="englishSaveNote" class="small muted"></p><pre id="englishDiagnostic" class="english-diagnostic" hidden></pre><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
  $('#englishBack').onclick=()=>show('english');
  if(!usable){$('#englishNewTopic').onclick=()=>show('english');return}
  const secure=typeof window!=='undefined'&&window.isSecureContext;
  const supported=typeof RTCPeerConnection!=='undefined'&&navigator.mediaDevices?.getUserMedia;
  if(!secure||!supported){$('#englishStartCall').disabled=true;$('#englishMicNote').textContent=!secure?'请通过 HTTPS 打开网站并允许麦克风。':'当前浏览器不支持实时语音，请使用新版 Chrome 或 Edge。'}
- $('#englishStartCall').onclick=busy(englishStartCall);$('#englishStopCall').onclick=busy(()=>englishStopCall());
+ $('#englishGuide').onclick=englishGuideCall;$('#englishStartCall').onclick=busy(englishStartCall);$('#englishStopCall').onclick=busy(()=>englishStopCall());
  $('#englishMute').onclick=()=>{const call=englishCall;if(!call?.track||!call.ready)return;call.track.enabled=!call.track.enabled;$('#englishMute').textContent=call.track.enabled?'静音':'取消静音';englishStatus(call.track.enabled?'正在听你说…':'已静音')};
  $('#englishPlayAudio').onclick=busy(async()=>{await $('#englishRemoteAudio').play();$('#englishPlayAudio').hidden=true});
  $('#englishHint').onclick=busy(async()=>{const r=await api('/english/sessions/'+s.id+'/hint','POST');$('#englishHintText').textContent=r.hint;$('#englishHintText').hidden=false});

@@ -17,6 +17,7 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  result=await vm.runInContext('views.englishChat()',ctx);result.bind();
  assert(result.html.includes('开始对话')&&result.html.includes('englishMicrophone'));
  assert(result.html.includes('englishPersonRole')&&result.html.includes('englishPersonVoice'));
+ assert(result.html.includes('englishGuide')&&result.html.includes('带我聊'));
  for(const old of ['上传音频','确认并发送','录一句','慢速朗读','type="file"'])assert(!result.html.includes(old));
  assert(node('#englishStartCall').disabled&&node('#englishMicNote').textContent.includes('HTTPS'));
  ctx.tracksStopped=0;ctx.closed=0;
@@ -43,6 +44,18 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  node('#englishPersonRole').value='engineer';node('#englishPersonVoice').value='Jennifer';
  await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
  assert(sent[0].type==='session.update'&&sent[1].type==='response.create');assert(track.enabled);
+ // A requested lead creates one assistant turn, with no fabricated learner text.
+ const beforeGuide=sent.length;
+ vm.runInContext(`englishCall.openingPending=false;englishCall.responding=true;englishGuideCall()`,ctx);
+ assert(sent.length===beforeGuide,'guide waits for the current response');
+ vm.runInContext(`englishCall.responding=false;englishCall.speaking=true;englishGuideCall()`,ctx);
+ assert(sent.length===beforeGuide,'guide never talks over student speech');
+ vm.runInContext(`englishCall.speaking=false;englishGuideCall();englishGuideCall()`,ctx);
+ assert(sent.length===beforeGuide+1,'one click produces one request until the response arrives');
+ assert(sent.at(-1).response.instructions.includes('lead-the-conversation'));
+ assert(sent.at(-1).type==='response.create');
+ vm.runInContext(`englishEvent(englishCall,{data:JSON.stringify({type:'response.created'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'response.done',response:{status:'completed'}})},englishCall.channel)`,ctx);
+ assert(!node('#englishGuide').disabled);
  // Model failures remain visible to the teacher with sensitive strings redacted.
  vm.runInContext(`user={role:'teacher'};englishEvent(englishCall,{data:JSON.stringify({type:'error',error:{code:'invalid_request_error',param:'session.audio.output.voice',message:'Unsupported voice; api_key=sk-FAKE.secret Bearer fake-token'}})},englishCall.channel)`,ctx);
  assert(node('#englishDiagnostic').textContent.includes('invalid_request_error'));
