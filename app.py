@@ -561,7 +561,7 @@ def ai_settings():
     return json.loads(path.read_text()) if path.exists() else {'base_url':'https://api.openai.com/v1','model':'','key':''}
 @app.get('/api/teacher/ai-settings')
 def get_ai(u=Depends(teacher)):
-    s=ai_settings();return {'base_url':s['base_url'],'model':s['model'],'configured':bool(s.get('key') and s.get('model')),'auto_review':s.get('auto_review',True),'auto_return':s.get('auto_return',True),'error_threshold':s.get('error_threshold',5),'formal_standard':s.get('formal_standard',DEFAULT_STANDARD),'review_mode':s.get('review_mode','immediate' if s.get('auto_review',True) else 'manual'),'review_time':s.get('review_time','00:30'),'off_peak_only':s.get('off_peak_only',False)}
+    s=ai_settings();return {'base_url':s['base_url'],'model':s['model'],'configured':bool(s.get('key') and s.get('model')),'auto_review':s.get('auto_review',True),'auto_return':s.get('auto_return',True),'error_threshold':s.get('error_threshold',5),'formal_standard':s.get('formal_standard',DEFAULT_STANDARD),'review_mode':s.get('review_mode','immediate' if s.get('auto_review',True) else 'manual'),'review_time':s.get('review_time','00:30'),'off_peak_only':s.get('off_peak_only',False),'review_version':'1.5.1'}
 class AISettings(BaseModel):
     review_mode:str|None=Field(default=None,pattern='^(immediate|manual|scheduled)$')
     review_time:str=Field(default='00:30',pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
@@ -596,7 +596,7 @@ def ai_call(system,payload):
     with db() as c:cached=c.execute('SELECT payload FROM ai_result_cache WHERE hash=?',(key,)).fetchone()
     def log(usage,local):
         with db() as c:c.execute('INSERT INTO ai_usage(user_id,submission_id,purpose,model,input_tokens,output_tokens,cache_hit_tokens,local_cache,created) VALUES(?,?,?,?,?,?,?,?,?)',(ctx.get('user_id'),ctx.get('submission_id'),ctx.get('purpose','练习'),cfg['model'],int(usage.get('prompt_tokens',0)),int(usage.get('completion_tokens',0)),int(usage.get('prompt_cache_hit_tokens',0)),int(local),now()))
-    if cached:
+    if cached and not ctx.get('refresh',False):
         log({},True);return json.loads(cached['payload'])
     content=[{'type':'text','text':text}]
     for path in images:
@@ -642,16 +642,18 @@ def run_review(sid):
             s=dict(c.execute('SELECT s.*,a.instructions,a.rubric,a.title assignment_title,a.grading_instructions,a.revision assignment_revision FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?',(sid,)).fetchone())
             c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(sid,))
         cfg=ai_settings()
+        previous=json.loads(s['ai_json']) if s['ai_json'] else {}
+        refresh_score=bool(s['ai_json'] and previous.get('score') is None)
         if urlparse(cfg['base_url']).hostname=='api.deepseek.com' and cfg.get('model')!='deepseek-flash':
             raise ValueError('图文预审请使用支持视觉的 deepseek-flash 模型')
         with prepare_document(s['path']) as document:
             # Rendering may cross the pricing boundary; check again before API use.
             if cfg.get('off_peak_only',False) and peak(time.time()):raise DeferReview()
-            response=ai_call(FORMAL_PROMPT+'\n'+SCORING_PROMPT,{'grading_instructions':s['grading_instructions'],'assignment':s['instructions'],'rubric':json.loads(s['rubric']),'standard':cfg.get('formal_standard',DEFAULT_STANDARD),'document':document['text'],'page_count':document['page_count'],'warnings':document['warnings'],'_images':[p['image_path'] for p in document['pages']],'_usage_context':{'user_id':s['user_id'],'submission_id':sid,'purpose':'论文图文形式预审'}})
+            response=ai_call(FORMAL_PROMPT+'\n'+SCORING_PROMPT,{'grading_instructions':s['grading_instructions'],'assignment':s['instructions'],'rubric':json.loads(s['rubric']),'standard':cfg.get('formal_standard',DEFAULT_STANDARD),'document':document['text'],'page_count':document['page_count'],'warnings':document['warnings'],'_images':[p['image_path'] for p in document['pages']],'_usage_context':{'user_id':s['user_id'],'submission_id':sid,'purpose':'论文图文预审与建议评分','refresh':refresh_score}})
             formal=normalize_formal(response.get('formal_check'),document,cfg.get('error_threshold',5))
             scoring=normalize_score(response.get('dimensions'),json.loads(s['rubric']),document,formal)
         triage={'recommendation':'return' if formal['decision']=='revise' else 'review','reasons':[x['problem'] for x in formal['issues']],'required_changes':[x['change'] for x in formal['issues']],'evidence':[x['quote'] or x['evidence'] for x in formal['issues']],'evidence_matches':[x['evidence_located'] for x in formal['issues']]}
-        result={'formal_check':formal,'triage':triage,'dimensions':scoring['dimensions'],'score':scoring['score'],'score_warning':scoring['warning'],'scoring_basis':{'revision':s['assignment_revision'],'title':s['assignment_title'],'instructions':s['instructions'],'grading_instructions':s['grading_instructions'],'rubric':json.loads(s['rubric'])},'summary':str(response.get('summary',''))[:6000],'issues':[],'reference_note':str(response.get('reference_note','仅检查引用格式，未核实文献真实性'))[:2000],'reviewed_at':now()}
+        result={'formal_check':formal,'triage':triage,'dimensions':scoring['dimensions'],'score':scoring['score'],'score_warning':scoring['warning'],'scoring_version':'1.5.1','scoring_basis':{'revision':s['assignment_revision'],'title':s['assignment_title'],'instructions':s['instructions'],'grading_instructions':s['grading_instructions'],'rubric':json.loads(s['rubric'])},'summary':str(response.get('summary',''))[:6000],'issues':[],'reference_note':str(response.get('reference_note','仅检查引用格式，未核实文献真实性'))[:2000],'reviewed_at':now()}
         auto=bool(cfg.get('auto_return',True) and formal['automatic_eligible'])
         if auto:status='AI形式预审退回，待修改'
         elif formal['decision']=='pass':status='形式预审通过，待教师评阅'
@@ -722,7 +724,7 @@ def review_jobs(u=Depends(teacher)):
     with db() as c:
         counts={r['state']:r['n'] for r in c.execute('SELECT state,COUNT(*) n FROM paper_review_jobs GROUP BY state')}
         rows=[dict(r) for r in c.execute('SELECT j.id,j.submission_id,j.run_at,j.state,j.error,j.created,u.name,u.student_no,a.title FROM paper_review_jobs j LEFT JOIN submissions s ON s.id=j.submission_id LEFT JOIN users u ON u.id=s.user_id LEFT JOIN assignments a ON a.id=s.assignment_id ORDER BY j.id DESC LIMIT 100')]
-    return {'counts':counts,'jobs':rows,'timezone':'Asia/Shanghai'}
+    return {'counts':counts,'jobs':rows,'timezone':'Asia/Shanghai','review_version':'1.5.1'}
 
 @app.delete('/api/teacher/review-jobs/{jid}')
 def cancel_review(jid:int,u=Depends(teacher)):

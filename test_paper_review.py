@@ -52,7 +52,9 @@ def test_scoring_is_sum_of_valid_grounded_dimensions():
         rows[0]['score']=bad
         assert normalize_score(rows,rubric,document,{'readable':True})['score'] is None
     rows[0]['score']=51;rows[0]['quote']='编造的引用不存在'
-    assert normalize_score(rows,rubric,document,{'readable':True})['score'] is None
+    result=normalize_score(rows,rubric,document,{'readable':True})
+    assert result['score']==83.5 and not result['dimensions'][0]['quote_verified']
+    assert '引用未匹配' in result['warning']
     assert normalize_score([],rubric,document,{'readable':False})['score'] is None
 
 def test_real_review_uses_teacher_requirements_but_does_not_publish(monkeypatch):
@@ -164,3 +166,46 @@ def test_server_lifespan_starts_and_stops_queue(monkeypatch):
     monkeypatch.setattr(a.REVIEW_QUEUE,'stop',lambda:events.append('stop'))
     with TestClient(a.app) as c:assert c.get('/healthz').json()=={'ok':True}
     assert events==['start','stop']
+
+
+def test_score_format_tolerance_and_precise_failure_reason():
+    rubric=[{'name':'研究问题','max':60},{'name':'学术表达','max':40}]
+    document={'text':QUOTE,'complete':True}
+    rows=[{'name':' 研究 问题 ','score':'48','comment':'清楚','quote':''}, {'name':'学术表达','score':'30.5','comment':'基本清楚','quote':QUOTE}, {'name':'总分','score':999}]
+    result=normalize_score(rows,rubric,document,{'readable':True})
+    assert result['score']==78.5 and not result['dimensions'][0]['quote_verified']
+    assert '额外评分项' in result['warning']
+    result=normalize_score(rows[:1],rubric,document,{'readable':True})
+    assert result['score'] is None and result['dimensions'][0]['score']==48
+    assert '缺少“学术表达”' in result['warning']
+    assert '旧审核记录' in normalize_score([],rubric,document,{'readable':True})['warning']
+    assert '文档未完整读取' in normalize_score(rows,rubric,{'text':QUOTE,'complete':False},{'readable':True})['warning']
+
+
+def test_missing_score_retry_bypasses_failed_response_cache(monkeypatch):
+    t=teacher();s=student('scoreretry100');aid,_=assignment(t);sid=upload(s,aid);contexts=[]
+    @contextmanager
+    def prepared(path):yield {'text':QUOTE,'complete':True,'page_count':1,'warnings':[],'pages':[{'page_no':1,'text':QUOTE,'image_path':'test.jpg'}]}
+    def ai(system,payload):
+        contexts.append(payload['_usage_context'])
+        return {'formal_check':{'decision':'pass','readable':True,'confidence':.95,'issues':[]},'dimensions':[]}
+    monkeypatch.setattr(a,'prepare_document',prepared);monkeypatch.setattr(a,'ai_call',ai)
+    assert a.run_review(sid) and a.run_review(sid)
+    assert contexts[0]['refresh'] is False and contexts[1]['refresh'] is True
+
+def test_ai_call_refresh_really_skips_cached_result(monkeypatch):
+    calls=[]
+    class Response:
+        status_code=200
+        def json(self):return {'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'attempt':len(calls)})}}],'usage':{}}
+    class Client:
+        def __init__(self,*args,**kwargs):pass
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def post(self,*args,**kwargs):calls.append(1);return Response()
+    monkeypatch.setattr(a.httpx,'Client',Client)
+    payload={'test_nonce':'score-retry-cache','_usage_context':{'user_id':998877,'purpose':'评分缓存测试'}}
+    first=a.ai_call('cache refresh test',payload)
+    cached=a.ai_call('cache refresh test',payload)
+    refreshed=a.ai_call('cache refresh test',{**payload,'_usage_context':{**payload['_usage_context'],'refresh':True}})
+    assert first==cached=={'attempt':1} and refreshed=={'attempt':2} and len(calls)==2

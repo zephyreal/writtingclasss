@@ -26,5 +26,12 @@ vm.runInContext('user={name:"教师",role:"teacher"};api=async()=>[assignment]',
  vm.runInContext('api=async()=>settings',ctx);
  r=await vm.runInContext('views.settings()',ctx);
  assert(r.html.includes('name="review_time"')&&r.html.includes('name="off_peak_only"')&&r.html.includes('线上练习不能可靠阻止AI代答'));
+
+ ctx.reviewRecord={id:9,name:'学生',status:'形式预审通过，待教师评阅',assignment_revision:1,published:false,returned:false,score:null,feedback:'',ai:{score:null,summary:'仅形式审核',dimensions:[],issues:[],reference_note:'未核实',triage:{recommendation:'review',reasons:[],required_changes:[],evidence:[],evidence_matches:[]}}};
+ vm.runInContext('openReview(reviewRecord)',ctx);
+ assert(node('#modalBody').innerHTML.includes('补评分 / 重新AI批改')&&node('#modalBody').innerHTML.includes('旧版只做形式审核'));
+ ctx.reviewRecord.ai.score=80;ctx.reviewRecord.ai.dimensions=[{name:'表达',score:80,max:100,comment:'评分意见',quote:'未匹配的引用',quote_verified:false}];
+ vm.runInContext('openReview(reviewRecord)',ctx);
+ assert(node('#modalBody').innerHTML.includes('评分依据待人工核对')&&node('#modalBody').innerHTML.includes('AI建议分 80'));
  console.log('Paper editing, rubric submission, scoring basis, batch scheduling and settings UI checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
