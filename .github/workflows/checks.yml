@@ -17,11 +17,13 @@ jobs:
         run: python -m pip install -r requirements.txt pytest
       - name: Run application and UI checks
         run: |
-          python -m pytest -q test_app.py test_english.py
+          python -m pytest -q test_app.py test_english.py test_paper_review.py
           node --check static/app.js
           node --check static/english.js
+          node --check static/teacher-writing.js
           node test_frontend.cjs
           node test_english_frontend.cjs
+          node test_paper_frontend.cjs
           bash -n install.sh
           bash -n upgrade.sh
           bash -n enable-english-voice.sh

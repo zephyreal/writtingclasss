@@ -1,6 +1,6 @@
 import csv, io, json, os, re, secrets, sqlite3, hashlib, hmac, time, zipfile, math
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager,asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import urlparse
@@ -9,7 +9,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
-from review_pipeline import prepare_document, normalize_formal, return_reason, FORMAL_PROMPT, DEFAULT_STANDARD
+from review_pipeline import prepare_document, normalize_formal, normalize_score, return_reason, FORMAL_PROMPT, SCORING_PROMPT, DEFAULT_STANDARD
+from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR', str(ROOT/'data')))
@@ -20,7 +21,12 @@ DB=DATA/'course.db'
 LIMIT=5_000_000
 SECURE=os.getenv('COOKIE_SECURE','false').lower()=='true'
 POOL=ThreadPoolExecutor(max_workers=1)
-app=FastAPI(title='智学工坊 · 课程教学平台',docs_url=None,redoc_url=None)
+@asynccontextmanager
+async def lifespan(application):
+    REVIEW_QUEUE.start()
+    try:yield
+    finally:REVIEW_QUEUE.stop()
+app=FastAPI(title='智学工坊 · 课程教学平台',docs_url=None,redoc_url=None,lifespan=lifespan)
 
 @contextmanager
 def db():
@@ -61,6 +67,9 @@ def init():
         ''')
         c.execute("CREATE TABLE IF NOT EXISTS learner_profiles(user_id INTEGER PRIMARY KEY REFERENCES users(id),research_area TEXT DEFAULT '',writing_stage TEXT DEFAULT '选题阶段',goal TEXT DEFAULT '',teacher_note TEXT DEFAULT '',updated TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS submission_history(id INTEGER PRIMARY KEY,submission_id INTEGER,user_id INTEGER,path TEXT,filename TEXT,snapshot TEXT,archived TEXT)")
+        assignment_columns={row['name'] for row in c.execute('PRAGMA table_info(assignments)')}
+        if 'grading_instructions' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN grading_instructions TEXT NOT NULL DEFAULT ''")
+        if 'revision' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
         if 'return_reason' not in columns:c.execute("ALTER TABLE submissions ADD COLUMN return_reason TEXT NOT NULL DEFAULT ''")
@@ -364,19 +373,49 @@ def assignments(u=Depends(current)):
                 a['submission'].update(score=None,feedback='')
                 if not s['returned'] and s['status']=='AI建议退回，待教师确认':a['submission']['status']='AI已评，待教师复核'
     return result
+class Criterion(BaseModel):
+    name:str=Field(min_length=1,max_length=80)
+    max:float=Field(gt=0,le=100)
 class Assignment(BaseModel):
     title:str=Field(min_length=1,max_length=150)
     instructions:str=Field(min_length=1,max_length=10000)
-    deadline:str=''
+    deadline:str=Field(default='',max_length=50)
+    grading_instructions:str=Field(default='',max_length=8000)
+    rubric:list[Criterion]|None=Field(default=None,min_length=1,max_length=10)
+    expected_revision:int|None=None
+
+def assignment_values(x,c):
+    if not x.title.strip() or not x.instructions.strip():raise HTTPException(400,'作业名称和要求不能为空')
+    if x.deadline:
+        try:
+            if datetime.fromisoformat(x.deadline).tzinfo is not None:raise ValueError()
+        except ValueError:raise HTTPException(400,'截止时间请使用北京时间，不带时区后缀')
+    rubric=[r.model_dump() for r in x.rubric] if x.rubric is not None else None
+    if rubric is not None:
+        names=[r['name'].strip() for r in rubric]
+        if len(set(names))!=len(names) or not all(names) or abs(sum(r['max'] for r in rubric)-100)>.001:raise HTTPException(400,'评分维度名称不能重复或为空，分值之和须为100')
+        for item,name in zip(rubric,names):item['name']=name
+    return rubric
+
 @app.post('/api/assignments')
 def create_assignment(x:Assignment,u=Depends(teacher)):
-    if x.deadline:
-        try:datetime.fromisoformat(x.deadline)
-        except ValueError:raise HTTPException(400,'截止时间格式错误')
     with db() as c:
-        rubric=c.execute('SELECT rubric FROM assignments ORDER BY id LIMIT 1').fetchone()[0]
-        c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created) VALUES(?,?,?,?,?)',(x.title,x.instructions,rubric,x.deadline,now()))
-    return {'ok':True}
+        rubric=assignment_values(x,c)
+        if rubric is None:rubric=json.loads(c.execute('SELECT rubric FROM assignments ORDER BY id LIMIT 1').fetchone()[0])
+        aid=c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created,grading_instructions) VALUES(?,?,?,?,?,?)',(x.title.strip(),x.instructions.strip(),json.dumps(rubric,ensure_ascii=False),x.deadline,now(),x.grading_instructions)).lastrowid
+    audit(u['id'],'create-assignment',aid);return {'ok':True,'id':aid}
+
+@app.put('/api/assignments/{aid}')
+def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        old=c.execute('SELECT * FROM assignments WHERE id=?',(aid,)).fetchone()
+        if not old:raise HTTPException(404,'作业不存在')
+        if x.expected_revision is not None and x.expected_revision!=old['revision']:raise HTTPException(409,'作业已被更新，请刷新后再编辑')
+        if c.execute("SELECT 1 FROM submissions WHERE assignment_id=? AND status IN ('AI排队中','AI批改中') LIMIT 1",(aid,)).fetchone():raise HTTPException(409,'本作业正在AI批改，请完成或取消排队任务后再编辑')
+        rubric=assignment_values(x,c)
+        c.execute('UPDATE assignments SET title=?,instructions=?,deadline=?,grading_instructions=?,rubric=?,revision=revision+1 WHERE id=?',(x.title.strip(),x.instructions.strip(),x.deadline,x.grading_instructions,json.dumps(rubric,ensure_ascii=False) if rubric is not None else old['rubric'],aid))
+    audit(u['id'],'edit-assignment',aid);return {'ok':True,'revision':old['revision']+1}
 @app.post('/api/submissions')
 async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends(current)):
     throttle('upload:'+str(u['id']),20,3600)
@@ -394,7 +433,7 @@ async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
             old=c.execute('SELECT * FROM submissions WHERE assignment_id=? AND user_id=?',(assignment_id,u['id'])).fetchone()
-            status='AI排队中' if auto else '待批改'
+            status='待批改'
             if old:
                 if not old['returned']:raise HTTPException(409,'作业已提交')
                 c.execute('INSERT INTO submission_history(submission_id,user_id,path,filename,snapshot,archived) VALUES(?,?,?,?,?,?)',(old['id'],u['id'],old['path'],old['filename'],json.dumps(dict(old),ensure_ascii=False),now()))
@@ -407,7 +446,10 @@ async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends
                 c.execute('INSERT INTO submissions(id,assignment_id,user_id,path,filename,created,status) VALUES(?,?,?,?,?,?,?)',(sid,assignment_id,u['id'],path,name,now(),status))
     except Exception:
         Path(path).unlink(missing_ok=True);raise
-    if auto:POOL.submit(run_review,sid)
+    if auto:
+        due=next_daily(cfg.get('review_time','00:30')) if cfg.get('review_mode')=='scheduled' else None
+        try:REVIEW_QUEUE.enqueue(sid,run_at=due)
+        except HTTPException:auto=False
     return {'ok':True,'auto_review':auto}
 @app.delete('/api/submissions/{sid}')
 def delete_submission(sid:int,u=Depends(current)):
@@ -437,7 +479,7 @@ def submission_file(sid:int,u=Depends(current)):
 @app.get('/api/teacher/submissions')
 def all_submissions(u=Depends(teacher)):
     with db() as c:
-        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id ORDER BY s.id DESC')]
+        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id ORDER BY s.id DESC')]
         for r in rows:r['ai']=json.loads(r.pop('ai_json')) if r['ai_json'] else None
     return rows
 class Grade(BaseModel):
@@ -449,7 +491,7 @@ def grade(sid:int,x:Grade,u=Depends(teacher)):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         if not c.execute('SELECT 1 FROM submissions WHERE id=?',(sid,)).fetchone():raise HTTPException(404,'作业不存在')
-        if c.execute('SELECT status FROM submissions WHERE id=?',(sid,)).fetchone()[0] in ('AI排队中','AI批改中'):raise HTTPException(409,'请等待AI任务结束后再保存评分')
+        if c.execute('SELECT status FROM submissions WHERE id=?',(sid,)).fetchone()[0] in BUSY:raise HTTPException(409,'请等待AI任务结束后再保存评分')
         if c.execute('SELECT returned FROM submissions WHERE id=?',(sid,)).fetchone()[0]:raise HTTPException(409,'已退回的作业须等待学生重交后评分')
         c.execute('UPDATE submissions SET score=?,feedback=?,published=?,status=? WHERE id=?',(x.score,x.feedback,int(x.published),'已发布' if x.published else '教师复核中',sid))
     audit(u['id'],'grade',sid)
@@ -461,7 +503,7 @@ def return_work(sid:int,x:ReturnWork,u=Depends(teacher)):
     with db() as c:
         s=c.execute('SELECT * FROM submissions WHERE id=?',(sid,)).fetchone()
         if not s:raise HTTPException(404,'作业不存在')
-        if s['status'] in ('AI排队中','AI批改中'):raise HTTPException(409,'请等待AI任务结束后再退回')
+        if s['status'] in BUSY:raise HTTPException(409,'请等待AI任务结束后再退回')
         if s['returned']:raise HTTPException(409,'该作业已退回，等待学生修改')
         c.execute("UPDATE submissions SET returned=1,return_reason=?,returned_at=?,published=0,status='已退回，待修改' WHERE id=?",(x.reason.strip(),now(),sid))
     audit(u['id'],'return-for-revision',sid);return {'ok':True}
@@ -519,8 +561,11 @@ def ai_settings():
     return json.loads(path.read_text()) if path.exists() else {'base_url':'https://api.openai.com/v1','model':'','key':''}
 @app.get('/api/teacher/ai-settings')
 def get_ai(u=Depends(teacher)):
-    s=ai_settings();return {'base_url':s['base_url'],'model':s['model'],'configured':bool(s.get('key') and s.get('model')),'auto_review':s.get('auto_review',True),'auto_return':s.get('auto_return',True),'error_threshold':s.get('error_threshold',5),'formal_standard':s.get('formal_standard',DEFAULT_STANDARD)}
+    s=ai_settings();return {'base_url':s['base_url'],'model':s['model'],'configured':bool(s.get('key') and s.get('model')),'auto_review':s.get('auto_review',True),'auto_return':s.get('auto_return',True),'error_threshold':s.get('error_threshold',5),'formal_standard':s.get('formal_standard',DEFAULT_STANDARD),'review_mode':s.get('review_mode','immediate' if s.get('auto_review',True) else 'manual'),'review_time':s.get('review_time','00:30'),'off_peak_only':s.get('off_peak_only',False)}
 class AISettings(BaseModel):
+    review_mode:str|None=Field(default=None,pattern='^(immediate|manual|scheduled)$')
+    review_time:str=Field(default='00:30',pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    off_peak_only:bool=False
     auto_review:bool=True
     auto_return:bool=True
     error_threshold:int=Field(default=5,ge=3,le=20)
@@ -532,7 +577,7 @@ class AISettings(BaseModel):
 def set_ai(x:AISettings,u=Depends(teacher)):
     parsed=urlparse(x.base_url)
     if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:raise HTTPException(400,'接口地址须为有效HTTPS基础地址，例如 https://api.openai.com/v1')
-    old=ai_settings();data={'base_url':x.base_url.rstrip('/'),'model':x.model.strip(),'key':x.key.strip() or old.get('key',''),'auto_review':x.auto_review,'auto_return':x.auto_return,'error_threshold':x.error_threshold,'formal_standard':x.formal_standard}
+    old=ai_settings();mode=x.review_mode or ('immediate' if x.auto_review else 'manual');data={'base_url':x.base_url.rstrip('/'),'model':x.model.strip(),'key':x.key.strip() or old.get('key',''),'auto_review':mode!='manual','review_mode':mode,'review_time':x.review_time,'off_peak_only':x.off_peak_only,'auto_return':x.auto_return,'error_threshold':x.error_threshold,'formal_standard':x.formal_standard}
     tmp=DATA/'ai.tmp';fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
     with os.fdopen(fd,'w') as f:json.dump(data,f)
     tmp.replace(DATA/'ai.json');audit(u['id'],'ai-settings','updated')
@@ -594,16 +639,19 @@ def extract(path):
 def run_review(sid):
     try:
         with db() as c:
-            s=dict(c.execute('SELECT s.*,a.instructions,a.rubric FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?',(sid,)).fetchone())
+            s=dict(c.execute('SELECT s.*,a.instructions,a.rubric,a.title assignment_title,a.grading_instructions,a.revision assignment_revision FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?',(sid,)).fetchone())
             c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(sid,))
         cfg=ai_settings()
         if urlparse(cfg['base_url']).hostname=='api.deepseek.com' and cfg.get('model')!='deepseek-flash':
             raise ValueError('图文预审请使用支持视觉的 deepseek-flash 模型')
         with prepare_document(s['path']) as document:
-            response=ai_call(FORMAL_PROMPT,{'assignment':s['instructions'],'rubric':json.loads(s['rubric']),'standard':cfg.get('formal_standard',DEFAULT_STANDARD),'document':document['text'],'page_count':document['page_count'],'warnings':document['warnings'],'_images':[p['image_path'] for p in document['pages']],'_usage_context':{'user_id':s['user_id'],'submission_id':sid,'purpose':'论文图文形式预审'}})
+            # Rendering may cross the pricing boundary; check again before API use.
+            if cfg.get('off_peak_only',False) and peak(time.time()):raise DeferReview()
+            response=ai_call(FORMAL_PROMPT+'\n'+SCORING_PROMPT,{'grading_instructions':s['grading_instructions'],'assignment':s['instructions'],'rubric':json.loads(s['rubric']),'standard':cfg.get('formal_standard',DEFAULT_STANDARD),'document':document['text'],'page_count':document['page_count'],'warnings':document['warnings'],'_images':[p['image_path'] for p in document['pages']],'_usage_context':{'user_id':s['user_id'],'submission_id':sid,'purpose':'论文图文形式预审'}})
             formal=normalize_formal(response.get('formal_check'),document,cfg.get('error_threshold',5))
+            scoring=normalize_score(response.get('dimensions'),json.loads(s['rubric']),document,formal)
         triage={'recommendation':'return' if formal['decision']=='revise' else 'review','reasons':[x['problem'] for x in formal['issues']],'required_changes':[x['change'] for x in formal['issues']],'evidence':[x['quote'] or x['evidence'] for x in formal['issues']],'evidence_matches':[x['evidence_located'] for x in formal['issues']]}
-        result={'formal_check':formal,'triage':triage,'dimensions':[],'score':None,'summary':str(response.get('summary',''))[:6000],'issues':[],'reference_note':str(response.get('reference_note','仅检查引用格式，未核实文献真实性'))[:2000],'reviewed_at':now()}
+        result={'formal_check':formal,'triage':triage,'dimensions':scoring['dimensions'],'score':scoring['score'],'score_warning':scoring['warning'],'scoring_basis':{'revision':s['assignment_revision'],'title':s['assignment_title'],'instructions':s['instructions'],'grading_instructions':s['grading_instructions'],'rubric':json.loads(s['rubric'])},'summary':str(response.get('summary',''))[:6000],'issues':[],'reference_note':str(response.get('reference_note','仅检查引用格式，未核实文献真实性'))[:2000],'reviewed_at':now()}
         auto=bool(cfg.get('auto_return',True) and formal['automatic_eligible'])
         if auto:status='AI形式预审退回，待修改'
         elif formal['decision']=='pass':status='形式预审通过，待教师评阅'
@@ -615,9 +663,12 @@ def run_review(sid):
             c.execute('UPDATE submissions SET ai_json=?,status=? WHERE id=?',(json.dumps(result,ensure_ascii=False),status,sid))
             if auto:c.execute('UPDATE submissions SET returned=1,return_reason=?,returned_at=?,published=0 WHERE id=?',(return_reason(formal),now(),sid))
         audit(s['user_id'],'auto-formal-return' if auto else 'formal-check',sid)
+        return True
+    except DeferReview:raise
     except Exception as e:
         message=str(e) if isinstance(e,ValueError) else '文档解析或网络请求失败，请教师复核'
         with db() as c:c.execute('UPDATE submissions SET status=? WHERE id=?',('预审需人工处理：'+message[:180],sid))
+        return False
 
 class Appeal(BaseModel):reason:str=Field(min_length=5,max_length=2000)
 @app.post('/api/submissions/{sid}/appeal')
@@ -635,16 +686,47 @@ def review(sid:int,u=Depends(teacher)):
     cfg=ai_settings()
     if not cfg.get('key') or not cfg.get('model'):raise HTTPException(400,'请先配置AI接口和模型')
     throttle('review:'+str(u['id']),40,3600)
-    with db() as c:
-        c.execute('BEGIN IMMEDIATE')
-        s=c.execute('SELECT * FROM submissions WHERE id=?',(sid,)).fetchone()
-        if not s:raise HTTPException(404,'作业不存在')
-        if s['returned']:raise HTTPException(409,'该作业已退回，请等待学生重交')
-        if s['published']:raise HTTPException(409,'已发布的作业不再自动批改，请使用教师评分修改')
-        if s['status'] in ('AI排队中','AI批改中'):raise HTTPException(409,'批改任务已经在运行')
-        c.execute("UPDATE submissions SET status='AI排队中' WHERE id=?",(sid,))
-    POOL.submit(run_review,sid);audit(u['id'],'ai-review',sid)
+    REVIEW_QUEUE.enqueue(sid,replace_ai=True);audit(u['id'],'ai-review',sid)
     return {'ok':True}
+
+class BatchReview(BaseModel):
+    assignment_id:int|None=None
+    run_at:str=Field(default='',max_length=50)
+
+@app.post('/api/teacher/reviews/batch')
+def batch_review(x:BatchReview,u=Depends(teacher)):
+    cfg=ai_settings()
+    if not cfg.get('key') or not cfg.get('model'):raise HTTPException(400,'请先配置AI接口')
+    throttle('batch-review:'+str(u['id']),12,3600)
+    due=None
+    if x.run_at:
+        try:
+            dt=datetime.fromisoformat(x.run_at)
+            if dt.tzinfo is not None:raise ValueError()
+            due=dt.replace(tzinfo=BJT).timestamp()
+            if not time.time()+5<=due<=time.time()+366*86400:raise ValueError()
+        except ValueError:raise HTTPException(400,'请选择未来一年内的北京时间，至少晚于当前5秒')
+    with db() as c:
+        rows=c.execute('SELECT id FROM submissions WHERE (? IS NULL OR assignment_id=?) ORDER BY id',(x.assignment_id,x.assignment_id)).fetchall()
+    queued=0
+    for row in rows:
+        try:REVIEW_QUEUE.enqueue(row['id'],run_at=due,wake=False);queued+=1
+        except HTTPException as e:
+            if e.status_code not in (404,409):raise
+    if due is None:REVIEW_QUEUE.wake()
+    audit(u['id'],'batch-ai-review',f'{queued} queued')
+    return {'ok':True,'queued':queued,'skipped':len(rows)-queued,'run_at':due,'off_peak_only':cfg.get('off_peak_only',False)}
+
+@app.get('/api/teacher/review-jobs')
+def review_jobs(u=Depends(teacher)):
+    with db() as c:
+        counts={r['state']:r['n'] for r in c.execute('SELECT state,COUNT(*) n FROM paper_review_jobs GROUP BY state')}
+        rows=[dict(r) for r in c.execute('SELECT j.id,j.submission_id,j.run_at,j.state,j.error,j.created,u.name,u.student_no,a.title FROM paper_review_jobs j LEFT JOIN submissions s ON s.id=j.submission_id LEFT JOIN users u ON u.id=s.user_id LEFT JOIN assignments a ON a.id=s.assignment_id ORDER BY j.id DESC LIMIT 100')]
+    return {'counts':counts,'jobs':rows,'timezone':'Asia/Shanghai'}
+
+@app.delete('/api/teacher/review-jobs/{jid}')
+def cancel_review(jid:int,u=Depends(teacher)):
+    REVIEW_QUEUE.cancel(jid);audit(u['id'],'cancel-ai-review',jid);return {'ok':True}
 
 @app.post('/api/practice/ai')
 def ai_practice(chapter_id:int=0,u=Depends(current)):
@@ -673,6 +755,8 @@ def ai_answer(pid:int,x:AIAnswer,u=Depends(current)):
 async def value_error(request,exc):return JSONResponse({'detail':str(exc)},400)
 @app.get('/healthz')
 def health():return {'ok':True}
+REVIEW_QUEUE=ReviewQueue(db,POOL,lambda sid:run_review(sid),ai_settings)
+
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)
 
