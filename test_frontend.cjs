@@ -9,6 +9,15 @@ vm.runInContext(fs.readFileSync(__dirname+'/static/english.js','utf8'),ctx);
  vm.runInContext(`user={name:'测试学生',role:'student'};api=async()=>[{id:1,title:'论文作业',instructions:'要求',deadline:'',rubric:[],submission:{id:3,returned:1,return_reason:'补充实验参数',returned_at:'2026-10-19',filename:'旧稿.docx'}}]`,ctx);
  let result=await vm.runInContext('views.assignments()',ctx);
  assert(result.html.includes('提交修改稿')&&result.html.includes('补充实验参数'));
+ ctx.fixtureAssignments=[{id:1,title:'论文作业',instructions:'要求',deadline:'',rubric:[],submission:{id:5,filename:'草稿.docx',created:'2026-10-19',status:'待批改',published:0,can_delete:true}}];
+ vm.runInContext('api=async()=>fixtureAssignments',ctx);
+ result=await vm.runInContext('views.assignments()',ctx);
+ assert(result.html.includes('data-delete-submission="5"')&&result.html.includes('截止时间前重新提交'));
+ ctx.fixtureAssignments[0].submission.can_delete=false;
+ ctx.fixtureAssignments[0].submission.status='AI已评，待教师复核';
+ result=await vm.runInContext('views.assignments()',ctx);
+ assert(!result.html.includes('data-delete-submission='),'已批改作业不显示学生删除按钮');
+
  const profile={research_area:'激光焊接',writing_stage:'初稿写作',goal:'补充证据',total_attempts:2,assessment:{score:0},modules:[{id:1,title:'研究问题',mastery:32.5,first_accuracy:0,recent_accuracy:50,recent_sample:2,recommended_level:2}],weak_topics:['研究问题'],recommendations:[{chapter_id:1,title:'研究问题',level:2,reason:'近期表现'}],recent_mistakes:[],writing_reviews:[]};
  ctx.fixtureProfile=profile;
  vm.runInContext('api=async()=>fixtureProfile',ctx);

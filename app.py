@@ -340,14 +340,26 @@ def answer(x:Answer,u=Depends(current)):
         c.execute('INSERT INTO attempts(user_id,question_id,choice,score,created) VALUES(?,?,?,?,?)',(u['id'],q['id'],x.choice,score,now()))
     return {'score':score,'answer':q['answer'],'explanation':q['explanation'],'counted':first}
 
+def submission_deletable(c,s):
+    # A failed/interrupted AI attempt without results is still unreviewed.
+    status=s['status'] or ''
+    unreviewed=status in ('待批改','AI任务中断，可重新批改') or status.startswith('预审需人工处理：')
+    return bool(unreviewed and not s['ai_json'] and s['score'] is None and not s['feedback']
+                and not s['published'] and not s['returned'] and not s['return_reason']
+                and not s['returned_at'] and not s['appeal_reason']
+                and not c.execute('SELECT 1 FROM submission_history WHERE submission_id=? LIMIT 1',(s['id'],)).fetchone())
+
 @app.get('/api/assignments')
 def assignments(u=Depends(current)):
     with db() as c:
         result=[dict(r) for r in c.execute('SELECT * FROM assignments ORDER BY id DESC')]
         for a in result:
             a['rubric']=json.loads(a['rubric'])
-            s=c.execute('SELECT id,filename,created,status,score,feedback,published,returned,return_reason,returned_at,appeal_reason FROM submissions WHERE assignment_id=? AND user_id=?',(a['id'],u['id'])).fetchone()
+            s=c.execute('SELECT id,filename,created,status,score,feedback,published,returned,return_reason,returned_at,appeal_reason,ai_json FROM submissions WHERE assignment_id=? AND user_id=?',(a['id'],u['id'])).fetchone()
             a['submission']=dict(s) if s else None
+            if s:
+                a['submission'].pop('ai_json')
+                a['submission']['can_delete']=u['role']=='student' and submission_deletable(c,s)
             if s and not s['published']:
                 a['submission'].update(score=None,feedback='')
                 if not s['returned'] and s['status']=='AI建议退回，待教师确认':a['submission']['status']='AI已评，待教师复核'
@@ -389,11 +401,33 @@ async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends
                 sid=old['id']
                 c.execute("UPDATE submissions SET path=?,filename=?,created=?,status=?,ai_json=NULL,score=NULL,feedback='',published=0,returned=0,return_reason='',returned_at='',appeal_reason='' WHERE id=?",(path,name,now(),status,sid))
             else:
-                sid=c.execute('INSERT INTO submissions(assignment_id,user_id,path,filename,created,status) VALUES(?,?,?,?,?,?)',(assignment_id,u['id'],path,name,now(),status)).lastrowid
+                # Never reuse a removed submission ID: stale teacher pages and old
+                # usage records must not point at a different student's new upload.
+                sid=c.execute("SELECT MAX(value)+1 FROM (SELECT COALESCE(MAX(id),0) value FROM submissions UNION ALL SELECT COALESCE(MAX(CAST(target AS INTEGER)),0) value FROM audit WHERE action='student-delete-submission')").fetchone()[0]
+                c.execute('INSERT INTO submissions(id,assignment_id,user_id,path,filename,created,status) VALUES(?,?,?,?,?,?,?)',(sid,assignment_id,u['id'],path,name,now(),status))
     except Exception:
         Path(path).unlink(missing_ok=True);raise
     if auto:POOL.submit(run_review,sid)
     return {'ok':True,'auto_review':auto}
+@app.delete('/api/submissions/{sid}')
+def delete_submission(sid:int,u=Depends(current)):
+    if u['role']!='student':raise HTTPException(403,'请使用学生账号删除自己的未批改作业')
+    with db() as c:
+        # Serializes against teacher grading, return and AI queue admission.
+        c.execute('BEGIN IMMEDIATE')
+        s=c.execute('SELECT * FROM submissions WHERE id=? AND user_id=?',(sid,u['id'])).fetchone()
+        if not s:raise HTTPException(404,'作业不存在')
+        if not submission_deletable(c,s):raise HTTPException(409,'作业已批改、正在批改或存在评阅历史，不能自行删除；如需修改请联系教师退回')
+        c.execute('DELETE FROM submissions WHERE id=?',(sid,))
+        c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'student-delete-submission',str(sid),now()))
+    # Uploads have random server-managed names; do not remove unrelated paths.
+    path=Path(s['path']).resolve()
+    if path.is_relative_to((DATA/'files').resolve()):
+        try:path.unlink(missing_ok=True)
+        except OSError:
+            import logging
+            logging.getLogger(__name__).warning('Deleted submission %s has an upload pending cleanup',sid)
+    return {'ok':True}
 @app.get('/api/submissions/{sid}/file')
 def submission_file(sid:int,u=Depends(current)):
     with db() as c:s=c.execute('SELECT * FROM submissions WHERE id=?',(sid,)).fetchone()

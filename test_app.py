@@ -37,6 +37,61 @@ def test_registration_validation_and_duplicate():
     assert s.post('/api/register',json={'name':'学生','student_no':'bad;id','password':'test-password-123'}).status_code==400
     assert s.post('/api/register',json={'name':'学生','student_no':'reg200','password':'short'}).status_code==422
 
+def test_student_delete_unreviewed_submission_and_resubmit(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(a,'ai_settings',lambda:{'key':'','model':''})
+    s=student('delete100');other=student('delete200');t=teacher()
+    assert submit(s).status_code==200
+    sub=s.get('/api/assignments').json()[0]['submission'];sid=sub['id']
+    assert sub['can_delete'] and 'ai_json' not in sub
+    with a.db() as c:path=c.execute('SELECT path FROM submissions WHERE id=?',(sid,)).fetchone()[0]
+    assert Path(path).exists()
+    assert other.delete(f'/api/submissions/{sid}').status_code==404
+    assert t.delete(f'/api/submissions/{sid}').status_code==403
+    assert s.delete(f'/api/submissions/{sid}').status_code==200
+    assert not Path(path).exists()
+    assert s.get('/api/assignments').json()[0]['submission'] is None
+    assert s.get(f'/api/submissions/{sid}/file').status_code==404
+    assert s.delete(f'/api/submissions/{sid}').status_code==404
+    assert submit(s).status_code==200
+    assert s.get('/api/assignments').json()[0]['submission']['id']>sid
+    assert t.post(f'/api/teacher/submissions/{sid}/grade',json={'score':90,'feedback':'旧页面','published':True}).status_code==404
+    with a.db() as c:assert c.execute("SELECT 1 FROM audit WHERE action='student-delete-submission' AND target=?",(str(sid),)).fetchone()
+
+def test_student_delete_blocks_review_states_and_history(monkeypatch):
+    monkeypatch.setattr(a,'ai_settings',lambda:{'key':'','model':''})
+    s=student('deleteprotected100');assert submit(s).status_code==200
+    sid=s.get('/api/assignments').json()[0]['submission']['id']
+    states=[{'status':'AI排队中'},{'status':'AI批改中'}, {'ai_json':'{}'},
+            {'score':0},{'feedback':'教师草稿'}, {'published':1}, {'returned':1},
+            {'return_reason':'修改'}, {'returned_at':'2026-10-19'},
+            {'appeal_reason':'申请复核'}, {'status':'教师恢复人工复核'}]
+    for changes in states:
+        with a.db() as c:
+            c.execute("UPDATE submissions SET status='待批改',ai_json=NULL,score=NULL,feedback='',published=0,returned=0,return_reason='',returned_at='',appeal_reason='' WHERE id=?",(sid,))
+            c.execute('UPDATE submissions SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',(*changes.values(),sid))
+        assert not s.get('/api/assignments').json()[0]['submission']['can_delete'],changes
+        assert s.delete(f'/api/submissions/{sid}').status_code==409,changes
+    with a.db() as c:
+        c.execute("UPDATE submissions SET status='待批改' WHERE id=?",(sid,))
+        c.execute('INSERT INTO submission_history(submission_id,user_id,path,filename,snapshot,archived) VALUES(?,?,?,?,?,?)',(sid,s.get('/api/me').json()['id'],'old','old.docx','{}',a.now()))
+    assert not s.get('/api/assignments').json()[0]['submission']['can_delete']
+    assert s.delete(f'/api/submissions/{sid}').status_code==409
+
+def test_student_can_delete_failed_ai_without_results_but_deadline_still_applies(monkeypatch):
+    monkeypatch.setattr(a,'ai_settings',lambda:{'key':'','model':''})
+    s=student('deletefailed100');assert submit(s).status_code==200
+    sub=s.get('/api/assignments').json()[0];sid=sub['submission']['id']
+    with a.db() as c:
+        c.execute("UPDATE submissions SET status='预审需人工处理：网络失败' WHERE id=?",(sid,))
+        c.execute("UPDATE assignments SET deadline='2020-01-01T00:00' WHERE id=?",(sub['id'],))
+    try:
+        assert s.get('/api/assignments').json()[0]['submission']['can_delete']
+        assert s.delete(f'/api/submissions/{sid}').status_code==200
+        assert submit(s).status_code==400
+    finally:
+        with a.db() as c:c.execute("UPDATE assignments SET deadline='' WHERE id=?",(sub['id'],))
+
 def test_first_attempt_score_and_adaptive():
     s=student('score100');q=s.get('/api/practice/next').json()
     assert 'answer' not in q and 'explanation' not in q
