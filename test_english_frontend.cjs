@@ -41,6 +41,19 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  ctx.fetch=async url=>({ok:true,json:async()=>url.endsWith('/connect')?{sdp:'v=0\r\nm=audio 9',expires:Date.now()/1000+300,session:{instructions:'Test configuration',modalities:['text','audio']}}:{ok:true}});
  await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
  assert(sent[0].type==='session.update'&&sent[1].type==='response.create');assert(track.enabled);
+ // Model failures remain visible to the teacher with sensitive strings redacted.
+ vm.runInContext(`user={role:'teacher'};englishEvent(englishCall,{data:JSON.stringify({type:'error',error:{code:'invalid_request_error',param:'session.audio.output.voice',message:'Unsupported voice; api_key=sk-FAKE.secret Bearer fake-token'}})},englishCall.channel)`,ctx);
+ assert(node('#englishDiagnostic').textContent.includes('invalid_request_error'));
+ assert(node('#englishDiagnostic').textContent.includes('session.audio.output.voice'));
+ assert(!node('#englishDiagnostic').textContent.includes('sk-FAKE')&&!node('#englishDiagnostic').textContent.includes('fake-token'));
+ assert(vm.runInContext('englishCall===null',ctx));
+ // A cancellation race must keep the microphone/session alive.
+ await vm.runInContext('englishStartCall()',ctx);await Promise.resolve();
+ vm.runInContext(`englishCall.responding=true;englishEvent(englishCall,{data:JSON.stringify({type:'input_audio_buffer.speech_started'})},englishCall.channel);englishEvent(englishCall,{data:JSON.stringify({type:'error',error:{code:'invalid_request_error',message:'Cancellation failed: no active response found.'}})},englishCall.channel)`,ctx);
+ assert(vm.runInContext('englishCall!==null',ctx));
+ vm.runInContext(`englishEvent(englishCall,{data:JSON.stringify({type:'response.done',response:{status:'failed',status_details:{error:{code:'insufficient_quota',message:'Quota exceeded'}}}})},englishCall.channel)`,ctx);
+ assert(vm.runInContext('englishCall===null',ctx));
+ assert(node('#englishDiagnostic').textContent.includes('insufficient_quota'));
  vm.runInContext('englishCleanup()',ctx);
  // Permission dialog resolved after navigation: no open mic, no cloud connection.
  let release;ctx.lateStream={getTracks(){return [{stop(){ctx.tracksStopped++}}]}};

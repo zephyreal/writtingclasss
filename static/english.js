@@ -42,7 +42,35 @@ function englishCaption(call,role,id,text,done=false){
   call.queue=call.queue.then(()=>api('/english/realtime/'+call.sid+'/transcript','POST',{item_id:String(id).slice(0,150),role,text:text.slice(0,4000)})).catch(()=>{const note=$('#englishSaveNote');if(note)note.textContent='部分对话文字未保存；语音通话仍可继续。'});
  }
 }
-function englishSend(call,event){if(call.channel?.readyState==='open')call.channel.send(JSON.stringify(event))}
+function englishSafeDiagnostic(value){
+ return String(value??'').slice(0,4000)
+  .replace(/\bsk-[A-Za-z0-9._-]+/gi,'[密钥已隐藏]')
+  .replace(/\bBearer\s+[^\s,;]+/gi,'Bearer [已隐藏]')
+  .replace(/((?:api[_ -]?key|authorization|access[_ -]?token|secret|password)["']?\s*[:=]\s*)["']?[^,\s"}]+/gi,'$1[已隐藏]')
+  .replace(/https?:\/\/[^\s]+/gi,'[地址已隐藏]').slice(0,700);
+}
+function englishSend(call,event){
+ if(call.channel?.readyState!=='open')return;
+ const id='event_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);
+ call.phase=event.type;
+ if(event.type==='response.cancel')call.cancelEvent=id;
+ call.channel.send(JSON.stringify({event_id:id,...event}));
+}
+function englishLiveFailure(call,error={},stage){
+ if(englishCall!==call||call.closed)return;
+ const code=englishSafeDiagnostic(error.code||error.type||'unknown_error');
+ const message=englishSafeDiagnostic(error.message||'千问未提供详细错误说明');
+ const param=englishSafeDiagnostic(error.param||'');
+ // A VAD/cancel race is recoverable. A generic invalid_request_error alone is NOT.
+ const noActive=/no active response|no response.*(?:cancel|progress)|response.*(?:already.*(?:cancel|complete)|not.*(?:active|progress))/i.test(String(error.message||''));
+ const cancelCode=/^(?:response_cancel_not_active|no_active_response|response_cancel_not_in_progress)$/i.test(String(error.code||''));
+ if(call.cancelEvent&&(noActive||cancelCode)){call.cancelEvent=null;call.responding=false;englishStatus('正在听你说…');return}
+ const details=['阶段：'+(stage||call.phase||'建立会话'),'错误码：'+code,param?'参数：'+param:'','说明：'+message].filter(Boolean).join('\n');
+ const box=$('#englishDiagnostic');
+ if(box&&user?.role==='teacher'){box.hidden=false;box.textContent=details}
+ englishStopCall('通话未完成（'+code+'）'+(user?.role==='teacher'?'，请查看下方错误详情':'，请联系教师'));
+}
+
 function englishEvent(call,event,channel){
  if(englishCall!==call||call.closed)return;
  let data;try{data=JSON.parse(event.data)}catch{return}
@@ -56,19 +84,18 @@ function englishEvent(call,event,channel){
   $('#englishStopCall').disabled=false;$('#englishMute').disabled=false;
  }else if(data.type==='input_audio_buffer.speech_started'){
   englishStatus('正在听你说…');
-  if(call.responding)englishSend(call,{type:'response.cancel'});
+  if(call.responding){call.responding=false;englishSend(call,{type:'response.cancel'})}
  }else if(data.type==='input_audio_buffer.speech_stopped')englishStatus('正在回应…');
  else if(data.type==='response.created'){call.responding=true;englishStatus('AI 正在说，可以直接插话')}
- else if(data.type==='response.done'){call.responding=false;englishStatus('轮到你了，慢慢说')}
+ else if(data.type==='response.done'){
+  call.responding=false;
+  if(data.response?.status==='failed'){englishLiveFailure(call,data.response.status_details?.error||{code:'response_failed'},'response.done');return}
+  englishStatus(data.response?.status==='cancelled'?'正在听你说…':'轮到你了，慢慢说');
+ }
  else if(data.type==='conversation.item.input_audio_transcription.completed')englishCaption(call,'student',data.item_id||data.event_id,data.transcript||data.text,true);
  else if(data.type==='response.audio_transcript.delta')englishCaption(call,'assistant',data.item_id||data.response_id,data.delta);
  else if(data.type==='response.audio_transcript.done')englishCaption(call,'assistant',data.item_id||data.response_id,data.transcript||data.text,true);
- else if(data.type==='error'){
-  const code=data.error?.code||'';
-  if(/cancel.*(active|progress)|no_active_response/.test(code))return;
-  // Never show raw upstream payloads or server debug data.
-  englishStopCall('千问未能继续通话，请教师检查接口权限、音色和可用额度');
- }
+ else if(data.type==='error')englishLiveFailure(call,data.error||data);
 }
 async function englishIce(pc,call){
  if(pc.iceGatheringState==='complete')return;
@@ -135,7 +162,7 @@ views.englishChat=async()=>{
  return {html:heading(esc(s.topic.title),'简单说一两句，慢慢来。','<button id="englishBack">← 换个话题</button>')+
  `<section class="card english-call"><div class="english-voice-orb" aria-hidden="true">En</div><h2 id="englishLiveStatus" role="status">${usable?'准备好了，就开始吧':'本次练习记录'}</h2><p class="muted">${usable?'AI 先开口 · 可以随时插话':'选择一个话题，开始新的语音练习'}</p><span id="englishClock" class="english-clock"></span><audio id="englishRemoteAudio" autoplay></audio><button id="englishPlayAudio" hidden>播放 AI 声音</button>`+
  (usable?`<div class="english-call-actions"><button class="primary" id="englishStartCall">开始对话</button><button id="englishMute" disabled>静音</button><button id="englishStopCall" disabled>结束</button><button id="englishHint">给我提示</button></div><p id="englishHintText" class="small" hidden></p><details class="english-device"><summary>麦克风设置</summary><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label></details><p id="englishMicNote" class="small warning"></p>`:'<button id="englishNewTopic">选择话题</button>')+
- `<details class="english-transcript"><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('')}</div></details><p id="englishSaveNote" class="small muted"></p><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
+ `<details class="english-transcript"><summary>对话文字</summary><div id="englishCaptions">${s.turns.map(t=>`<p><b>${t.role==='student'?'我':'AI'}</b> ${esc(t.text)}</p>`).join('')}</div></details><p id="englishSaveNote" class="small muted"></p><pre id="englishDiagnostic" class="english-diagnostic" hidden></pre><p class="small muted">语音将发送至阿里云千问处理；本站保存对话文字用于学习记录，不保存录音。请勿在对话中提供个人隐私。</p></section>`,bind(){
  $('#englishBack').onclick=()=>show('english');
  if(!usable){$('#englishNewTopic').onclick=()=>show('english');return}
  const secure=typeof window!=='undefined'&&window.isSecureContext;
@@ -155,7 +182,7 @@ views.englishHistory=async()=>{
 views.englishSettings=async()=>{
  englishCleanup();const s=await api('/teacher/english/realtime-settings');
  return {html:heading('英语实时语音 API','千问负责连续语音对话，论文批改接口在原设置中单独管理。')+
- `<section class="card english-api-settings"><span class="badge">${s.configured?'已保存配置':'待配置'}</span><h3>阿里云百炼 · 千问实时语音</h3><form id="englishApiForm"><label>模型<input value="${esc(s.model)}" readonly></label><label>地域<select name="region"><option value="cn-beijing" ${s.region==='cn-beijing'?'selected':''}>华北2（北京）</option><option value="ap-southeast-1" ${s.region==='ap-southeast-1'?'selected':''}>新加坡</option></select></label><label>业务空间 ID（Workspace ID）<input name="workspace_id" required maxlength="80" pattern="[A-Za-z0-9_-]+" value="${esc(s.workspace_id)}" placeholder="填写百炼业务空间 ID"></label><label>API Key<input name="key" type="password" autocomplete="new-password" maxlength="500" placeholder="${s.configured?'已保存，留空保留原密钥':'填写所选地域和业务空间的 API Key'}"></label><label>音色<input name="voice" required value="${esc(s.voice)}" maxlength="100" pattern="[A-Za-z0-9_-]+"></label><label>单次练习上限（分钟）<input name="minutes" type="number" required min="1" max="15" value="${s.minutes}"></label><p class="small muted">API Key 只保存在服务器。每账号每天最多尝试连接6次；网页到时或离开时关闭通话。模型费用按实际用量计费，费用上限请同时在百炼控制台管理。</p><button class="primary">保存语音配置</button><button type="button" id="englishTestCall">去试一次对话</button><details><summary>清除密钥</summary><label><input type="checkbox" name="clear_key">保存时清除现有密钥并停用新通话</label></details></form><p class="small muted">业务空间 ID、API Key 和模型权限必须属于所选地域。默认音色 Tina，可填写该模型官方支持的其他音色标识。试聊会产生实际模型费用。</p></section>`,bind(){
+ `<section class="card english-api-settings"><span class="badge">${s.configured?'已保存配置':'待配置'}</span><h3>阿里云百炼 · 千问实时语音</h3><form id="englishApiForm"><label>模型<input value="${esc(s.model)}" readonly></label><label>地域<select name="region"><option value="cn-beijing" ${s.region==='cn-beijing'?'selected':''}>华北2（北京）</option><option value="ap-southeast-1" ${s.region==='ap-southeast-1'?'selected':''}>新加坡</option></select></label><label>业务空间 ID（Workspace ID）<input name="workspace_id" required maxlength="80" pattern="[A-Za-z0-9_-]+" value="${esc(s.workspace_id)}" placeholder="填写百炼业务空间 ID"></label><label>API Key<input name="key" type="password" autocomplete="new-password" maxlength="500" placeholder="${s.configured?'已保存，留空保留原密钥':'填写所选地域和业务空间的 API Key'}"></label><label>音色<input name="voice" required value="${esc(s.voice)}" maxlength="100" pattern="[A-Za-z0-9_-]+"></label><label>单次练习上限（分钟）<input name="minutes" type="number" required min="1" max="15" value="${s.minutes}"></label><p class="small muted">API Key 只保存在服务器。学生每天最多尝试连接6次，教师调试最多60次；网页到时或离开时关闭通话。模型费用按实际用量计费，费用上限请同时在百炼控制台管理。</p><button class="primary">保存语音配置</button><button type="button" id="englishTestCall">去试一次对话</button><details><summary>清除密钥</summary><label><input type="checkbox" name="clear_key">保存时清除现有密钥并停用新通话</label></details></form><p class="small muted">业务空间 ID、API Key 和模型权限必须属于所选地域。默认音色 Tina，可填写该模型官方支持的其他音色标识。试聊会产生实际模型费用。</p></section>`,bind(){
  $('#englishApiForm').onsubmit=busy(async e=>{const body=Object.fromEntries(new FormData(e.target));body.minutes=Number(body.minutes);body.clear_key=body.clear_key==='on';await api('/teacher/english/realtime-settings','POST',body);toast('实时语音配置已保存');await show('englishSettings')});
  $('#englishTestCall').onclick=()=>show('english');
  }};

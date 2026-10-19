@@ -110,3 +110,18 @@ def test_cancel_during_negotiation_cannot_reactivate(monkeypatch):
     assert s.post(f'/api/english/realtime/{sid}/connect',json={'sdp':OFFER}).status_code==409
     state=s.get(f'/api/english/sessions/{sid}').json()
     assert state['ended'] and state['live_state']['state']=='closed'
+
+
+def test_student_connection_cap_and_teacher_debug_allowance(monkeypatch):
+    configure();s=student('livequota100');fake_cloud(monkeypatch)
+    for _ in range(6):
+        sid=live(s)
+        assert s.post(f'/api/english/realtime/{sid}/connect',json={'sdp':OFFER}).status_code==200
+        s.post(f'/api/english/realtime/{sid}/close')
+    sid=live(s)
+    assert s.post(f'/api/english/realtime/{sid}/connect',json={'sdp':OFFER}).status_code==429
+    t=teacher()
+    for _ in range(7):
+        sid=live(t)
+        assert t.post(f'/api/english/realtime/{sid}/connect',json={'sdp':OFFER}).status_code==200
+        t.post(f'/api/english/realtime/{sid}/close')

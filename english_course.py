@@ -329,7 +329,7 @@ def register(app, db, current, teacher, ai_call, ai_settings, throttle, data):
         if not config['key'] or not config['workspace_id']: raise HTTPException(503,'请教师先配置千问 API Key 和业务空间 ID')
         if not x.sdp.startswith('v=0') or 'm=audio ' not in x.sdp or 'm=video ' in x.sdp:
             raise HTTPException(400,'无法建立语音连接，请刷新后重试')
-        throttle('english-live-connect:'+str(u['id']),6,86400)
+        throttle('english-live-connect:'+str(u['id']),60 if u['role']=='teacher' else 6,86400)
         stamp=time.time()
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
