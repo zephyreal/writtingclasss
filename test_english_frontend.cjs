@@ -2,7 +2,7 @@ const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert');
 const nodes=new Map();
 function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',value:'',hidden:false,disabled:false,style:{},addEventListener(){},showModal(){},close(){},focus(){},querySelectorAll(){return []}});return nodes.get(s)}
 class Form{constructor(){this.rows=[]}append(...args){this.rows.push(args)}getAll(){return []}}
-const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener(){}},window:{isSecureContext:false},navigator:{mediaDevices:{getUserMedia(){throw Error('Should never invoke without permission')}}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),setTimeout,clearTimeout,console,FormData:Form});
+const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener(){}},window:{isSecureContext:false},navigator:{mediaDevices:{getUserMedia(){throw Error('Should never invoke without permission')}}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),URL:{createObjectURL:()=>"blob:english-test",revokeObjectURL:()=>{}},setTimeout,clearTimeout,console,FormData:Form});
 vm.runInContext(fs.readFileSync(__dirname+'/static/app.js','utf8'),ctx);
 vm.runInContext(fs.readFileSync(__dirname+'/static/english.js','utf8'),ctx);
 const profile={categories:{engineering:'机械与制造'},recommendation:'先练短句',measurement_note:'识别时间戳统计',interests:['engineering'],inferred_interests:[],recent_speech:[],completed_samples:0,practice_turns:0,spoken_turns:0,average_words:null};
@@ -17,11 +17,13 @@ vm.runInContext(`user={role:'student',name:'学生'};api=async p=>p==='/english/
  vm.runInContext('englishSession=fixtureSession;page="englishChat"',ctx);
  result=await vm.runInContext('views.englishChat()',ctx);result.bind();
  assert(result.html.includes('慢速朗读')&&result.html.includes('确认并发送'));
+ assert(result.html.includes('englishMicrophone')&&result.html.includes('englishMicLevel')&&result.html.includes('englishPlayback'));
  assert(node('#englishRecord').disabled);
  assert(node('#englishMicNote').textContent.includes('HTTP'));
  await vm.runInContext('englishUploadAudio({size:100},1)',ctx);
  assert(node('#englishRecord').disabled,'上传完音频后，HTTP页面仍不能启用麦克风');
  assert(node('#englishAnswer').value==='I make robots.');
+ assert(node('#englishPlayback').src==='blob:english-test'&&!node('#englishRecordingPreview').hidden);
  assert(vm.runInContext('englishTranscription',ctx)==='server-ticket');
  const typed=vm.runInContext('englishMetrics(null)',ctx);
  assert(typed.includes('未测量')&&!typed.includes('词/分'));

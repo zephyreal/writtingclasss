@@ -1,12 +1,34 @@
 'use strict';
 // Loaded after app.js; the main app owns authentication and course navigation.
-let englishSession=null, englishData=null, englishRecorder=null, englishStream=null, englishTimer=null, englishTranscription='', englishChunks=[], englishSending=false, englishAutoplay=true;
+let englishSession=null, englishData=null, englishRecorder=null, englishStream=null, englishTimer=null, englishTranscription='', englishChunks=[], englishSending=false, englishAutoplay=true, englishAudioUrl=null, englishAudioContext=null, englishLevelTimer=null, englishMicDevice='';
 const englishDate=x=>x?new Date(typeof x==='number'?x*1000:x).toLocaleString():'尚未同步';
 function englishCleanup(){
  if(englishRecorder?.state==='recording'){englishRecorder.onstop=null;englishRecorder.stop()}
  englishRecorder=null;englishStream?.getTracks().forEach(t=>t.stop());englishStream=null;
- clearTimeout(englishTimer);englishTranscription='';
+ clearTimeout(englishTimer);englishTranscription='';englishStopMeter();
+ if(englishAudioUrl){$('#englishPlayback')?.pause?.();URL.revokeObjectURL(englishAudioUrl);englishAudioUrl=null}
  if(typeof speechSynthesis!=='undefined')speechSynthesis.cancel();
+}
+function englishStopMeter(){
+ if(englishLevelTimer!==null){clearInterval(englishLevelTimer);englishLevelTimer=null}
+ if(englishAudioContext){englishAudioContext.close().catch(()=>{});englishAudioContext=null}
+}
+async function englishMicrophones(){
+ if(typeof navigator==='undefined'||!navigator.mediaDevices?.enumerateDevices)return;
+ try{const devices=await navigator.mediaDevices.enumerateDevices();const select=$('#englishMicrophone');if(!select||page!=='englishChat')return;
+ select.innerHTML='<option value="">系统默认麦克风</option>'+devices.filter(d=>d.kind==='audioinput'&&d.deviceId).map((d,i)=>`<option value="${esc(d.deviceId)}">${esc(d.label||'麦克风 '+(i+1))}</option>`).join('');select.value=englishMicDevice;
+ }catch{}
+}
+function englishStartMeter(stream){
+ englishStopMeter();const C=typeof window!=='undefined'&&(window.AudioContext||window.webkitAudioContext);if(!C)return;
+ try{const context=new C();englishAudioContext=context;context.resume().catch(()=>{});const analyser=context.createAnalyser();analyser.fftSize=1024;context.createMediaStreamSource(stream).connect(analyser);const values=new Float32Array(analyser.fftSize);
+ englishLevelTimer=setInterval(()=>{analyser.getFloatTimeDomainData(values);const rms=Math.sqrt(values.reduce((n,v)=>n+v*v,0)/values.length);const meter=$('#englishMicLevel');if(meter)meter.value=Math.max(0,Math.min(100,(20*Math.log10(Math.max(rms,1e-8))+60)/60*100))},150);
+ }catch{englishStopMeter()}
+}
+function englishAudioPreview(file){
+ if(typeof URL==='undefined'||!URL.createObjectURL)return;
+ if(englishAudioUrl)URL.revokeObjectURL(englishAudioUrl);englishAudioUrl=URL.createObjectURL(file);
+ const audio=$('#englishPlayback');if(audio)audio.src=englishAudioUrl;const preview=$('#englishRecordingPreview');if(preview)preview.hidden=false;
 }
 function englishSpeak(text){
  if(typeof speechSynthesis==='undefined'||typeof SpeechSynthesisUtterance==='undefined'){toast('此浏览器不支持朗读，可以换用 Chrome 或 Edge');return}
@@ -40,7 +62,7 @@ views.englishChat=async()=>{
  const s=englishSession,ended=!!s.ended;
  return {html:heading(esc(s.topic.title),`第 ${s.student_turns} / 20 轮 · ${s.mode==='stretch'?'尝试补充理由或例子':'简短问答，慢慢来'}`,`<button id="englishBack">← 话题列表</button>`)+
  `<div class="chat-layout"><section class="card english-chat" aria-label="英语对话记录">${s.turns.map(t=>`<article class="chat-turn ${t.role==='student'?'mine':'partner'}"><div class="chat-speaker">${t.role==='student'?'我':'AI 练习伙伴'}${t.role==='assistant'?`<button class="text-btn" data-speak-turn="${t.id}" aria-label="朗读这条回复">▶ 慢速朗读</button>`:''}</div><p class="chat-text">${esc(t.text)}</p>${t.role==='assistant'?`${t.details.notice?`<p class="small warning">${esc(t.details.notice)}</p>`:''}${(t.details.corrections||[]).length?`<details class="english-corrections"><summary>表达建议（AI，供参考）</summary>${t.details.corrections.map(c=>`<blockquote>${esc(c.quote)}</blockquote><p>${esc(c.suggestion)}</p><small>${esc(c.reason)}</small>`).join('')}</details>`:''}`:englishMetrics(t.details.speech)}</article>`).join('')}</section><aside class="card english-coach"><span class="eyebrow">YOUR PRACTICE SPACE</span><h3>先表达，再完善</h3><label class="english-auto-read"><input type="checkbox" id="englishAutoRead" ${englishAutoplay?'checked':''}>收到回复后自动慢速朗读</label><p>回答一两句就好。不知道怎么说时，试试句首提示。</p>${!ended?'<button id="englishHint">给我一点提示</button><div id="englishHintText" class="feedback" hidden></div>':''}<hr><p class="small muted">语速和停顿由识别时间戳计算，受转写误差影响。这里不生成发音分数，也不计入正式课程成绩。</p><p class="small muted">录音用于本地识别，处理后不保存音频。确认发送的文字、话题和近期对话会发给教师配置的 AI 接口；朗读由浏览器语音服务提供。</p></aside></div>`+
- (ended?'<div class="card"><h3>本次练习已结束</h3><p>完成至少3轮问答的对话会成为画像样本。</p><button id="englishReport">查看我的学习画像 →</button></div>':`<form id="englishTurnForm" class="card english-composer"><label for="englishAnswer">你的英语回答 <small>先转写确认，也可以直接输入</small></label><textarea id="englishAnswer" name="text" required maxlength="2000" rows="3" placeholder="I think… / In my project…"></textarea><div class="actions"><button type="button" id="englishRecord">● 录一句（最多60秒）</button><label class="audio-upload">上传音频<input id="englishAudio" type="file" accept="audio/*,.webm,.m4a,.mp3,.wav,.ogg"></label><button class="primary" id="englishSend" type="submit" ${s.student_turns>=20?'disabled':''}>确认并发送 →</button><button type="button" id="englishEnd">结束本次练习</button></div><p id="englishAudioStatus" class="small muted" role="status">音频不超过5 MB。识别结果可以修改，发送前请确认。</p><p id="englishMicNote" class="small warning" hidden></p></form>`),bind(){
+ (ended?'<div class="card"><h3>本次练习已结束</h3><p>完成至少3轮问答的对话会成为画像样本。</p><button id="englishReport">查看我的学习画像 →</button></div>':`<form id="englishTurnForm" class="card english-composer"><label for="englishAnswer">你的英语回答 <small>先转写确认，也可以直接输入</small></label><textarea id="englishAnswer" name="text" required maxlength="2000" rows="3" placeholder="I think… / In my project…"></textarea><div class="actions"><label>录音设备<select id="englishMicrophone"><option value="">系统默认麦克风</option></select></label><span class="small">输入音量（非评分）<meter id="englishMicLevel" min="0" max="100" value="0"></meter></span><button type="button" id="englishRecord">● 录一句（最多60秒）</button><label class="audio-upload">上传音频<input id="englishAudio" type="file" accept="audio/*,.webm,.m4a,.mp3,.wav,.ogg"></label><button class="primary" id="englishSend" type="submit" ${s.student_turns>=20?'disabled':''}>确认并发送 →</button><button type="button" id="englishEnd">结束本次练习</button></div><div id="englishRecordingPreview" hidden><p class="small">回听刚才的录音，确认能清楚听到自己的声音。</p><audio id="englishPlayback" controls preload="metadata" style="max-width:100%;width:100%"></audio></div><p id="englishAudioStatus" class="small muted" role="status">音频不超过5 MB。识别结果可以修改，发送前请确认。</p><p id="englishMicNote" class="small warning" hidden></p></form>`),bind(){
  $('#englishBack').onclick=()=>show('english');$('#englishAutoRead').onchange=e=>{englishAutoplay=e.target.checked;if(!englishAutoplay&&typeof speechSynthesis!=='undefined')speechSynthesis.cancel()};
  document.querySelectorAll('[data-speak-turn]').forEach(b=>b.onclick=()=>englishSpeak(s.turns.find(t=>String(t.id)===b.dataset.speakTurn).text));
  if(ended){$('#englishReport').onclick=()=>show('englishProfile');return}
@@ -54,22 +76,24 @@ views.englishChat=async()=>{
  const available=typeof navigator!=='undefined'&&navigator.mediaDevices?.getUserMedia&&typeof MediaRecorder!=='undefined';
  if(!englishData.speech_enabled||!secure||!available){$('#englishRecord').disabled=true;$('#englishMicNote').hidden=false;$('#englishMicNote').textContent=!englishData.speech_enabled?'教师需先启用服务器语音识别。当前可以文字练习。':!secure?'当前公网 HTTP 页面不能调用麦克风。启用 HTTPS 后可直接录音；现在可上传已有音频。':'此浏览器不支持网页录音，请上传已有音频。'}
  if(!englishData.speech_enabled)$('#englishAudio').disabled=true;
+ $('#englishMicrophone').onchange=e=>englishMicDevice=e.target.value;englishMicrophones();
  $('#englishAudio').onchange=busy(async e=>{const f=e.target.files[0];if(f)await englishUploadAudio(f,s.id);e.target.value=''});
  $('#englishRecord').onclick=busy(async()=>{
   if(englishRecorder?.state==='recording'){englishRecorder.stop();return}
   if(englishSending)return;
   $('#englishRecord').disabled=true;
-  let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}finally{if($('#englishRecord'))$('#englishRecord').disabled=false}
+  if(typeof speechSynthesis!=='undefined')speechSynthesis.cancel();$('#englishPlayback')?.pause?.();
+  let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:{...(englishMicDevice?{deviceId:{exact:englishMicDevice}}:{}),echoCancellation:true,noiseSuppression:true,autoGainControl:true}})}catch(e){throw Error(({NotAllowedError:'浏览器未允许麦克风，请在该站点权限中选择允许。',NotFoundError:'没有找到可用麦克风，请检查设备连接。',OverconstrainedError:'所选麦克风不可用，请切换到系统默认麦克风。'})[e.name]||e.message)}finally{if($('#englishRecord'))$('#englishRecord').disabled=false}
   // Navigation during the permission dialog must not leave an open microphone.
   if(page!=='englishChat'||englishSession?.id!==s.id){stream.getTracks().forEach(t=>t.stop());return}
-  englishStream=stream;
+  englishStream=stream;englishStartMeter(stream);englishMicrophones();$('#englishMicrophone').disabled=true;
   try{
    const type=['audio/webm;codecs=opus','audio/mp4','audio/webm'].find(t=>MediaRecorder.isTypeSupported(t));
    const recorder=new MediaRecorder(englishStream,type?{mimeType:type}:{});englishRecorder=recorder;englishChunks=[];
    recorder.ondataavailable=e=>{if(e.data.size)englishChunks.push(e.data)};
    recorder.onerror=()=>{englishCleanup();toast('录音失败，请检查麦克风权限')};
-   recorder.onstop=async()=>{clearTimeout(englishTimer);englishStream?.getTracks().forEach(t=>t.stop());englishStream=null;englishRecorder=null;const b=$('#englishRecord');if(b)b.textContent='● 录一句（最多60秒）';try{await englishUploadAudio(new Blob(englishChunks,{type:recorder.mimeType}),s.id)}catch(e){toast(e.message)}};
-   recorder.start(1000);$('#englishRecord').textContent='■ 结束录音并转写';$('#englishAudioStatus').textContent='录音中…请说一句英语。';englishTimer=setTimeout(()=>{if(recorder.state==='recording')recorder.stop()},60000);
+   recorder.onstop=async()=>{clearTimeout(englishTimer);englishStopMeter();if($('#englishMicrophone'))$('#englishMicrophone').disabled=false;englishStream?.getTracks().forEach(t=>t.stop());englishStream=null;englishRecorder=null;const b=$('#englishRecord');if(b)b.textContent='● 录一句（最多60秒）';try{await englishUploadAudio(new Blob(englishChunks,{type:recorder.mimeType}),s.id)}catch(e){toast(e.message)}};
+   recorder.start(1000);$('#englishRecord').textContent='■ 结束录音并转写';$('#englishAudioStatus').textContent='录音中…当前设备：'+(stream.getAudioTracks()[0]?.label||'默认麦克风')+'。说话时输入音量条应有变化。';englishTimer=setTimeout(()=>{if(recorder.state==='recording')recorder.stop()},60000);
   }catch(e){englishCleanup();throw e}
  });
  $('#englishAnswer').focus?.();
@@ -77,12 +101,12 @@ views.englishChat=async()=>{
 };
 async function englishUploadAudio(file,sid){
  if(englishSending)return;if(englishRecorder?.state==='recording')throw Error('请先结束当前录音');if(file.size>5000000)throw Error('音频不能超过5 MB');
- englishSending=true;const status=$('#englishAudioStatus'),send=$('#englishSend'),record=$('#englishRecord'),recordDisabled=record?.disabled;
+ englishAudioPreview(file);englishTranscription='';englishSending=true;const status=$('#englishAudioStatus'),send=$('#englishSend'),record=$('#englishRecord'),recordDisabled=record?.disabled;
  if(send)send.disabled=true;if(record)record.disabled=true;if(status)status.textContent='正在本地识别…请稍候，先不要发送。';
  try{const form=new FormData();form.append('file',file,'answer.audio');const r=await api('/english/transcribe','POST',form);
   if(page!=='englishChat'||englishSession?.id!==sid)return;
-  englishTranscription=r.transcription_id;$('#englishAnswer').value=r.text;$('#englishAudioStatus').textContent='识别完成。请检查文字后点击“确认并发送”；修改文字不会改写原录音指标。';
- }catch(e){if(status)status.textContent='转写未完成，可以重试或直接输入文字。';throw e}
+  englishTranscription=r.transcription_id;$('#englishAnswer').value=r.text;$('#englishAudioStatus').textContent='识别完成。请检查文字后点击“确认并发送”；修改文字不会改写原录音指标。'+(r.warnings?.length?' '+r.warnings.join(' '):'');
+ }catch(e){if(status)status.textContent=e.message+' 请先用上面的播放器回听这段录音。';throw e}
  finally{englishSending=false;if(send)send.disabled=false;if(record)record.disabled=recordDisabled}
 }
 views.englishHistory=async()=>{

@@ -21,3 +21,8 @@ button-to-speech interval with conversational response latency.
 
 `wikibit888/oral` was reviewed for architecture but its code is not incorporated:
 no explicit license was found at the time of this integration.
+
+Local ASR adapter update (2026-10-19): bounded gain and signal diagnostics,
+short-answer VAD parameters and one audible-input fallback without VAD cropping.
+Text without timestamps is retained with null timing metrics. Browser device selection,
+input metering and transient local playback are course integration features.
