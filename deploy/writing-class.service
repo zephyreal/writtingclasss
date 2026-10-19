@@ -1,0 +1,21 @@
+[Unit]
+Description=Research Writing Course
+After=network.target
+[Service]
+User=writingclass
+Group=writingclass
+WorkingDirectory=/opt/writing-class
+Environment=DATA_DIR=/var/lib/writing-class
+Environment=TZ=Asia/Shanghai
+Environment=COOKIE_SECURE=false
+ExecStart=/opt/writing-class/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/writing-class
+[Install]
+WantedBy=multi-user.target

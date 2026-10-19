@@ -1,0 +1,24 @@
+name: Course platform checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install application and test dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Run application and UI checks
+        run: |
+          python -m pytest -q test_app.py
+          node --check static/app.js
+          node test_frontend.cjs
+          bash -n install.sh
+          bash -n upgrade.sh

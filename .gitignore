@@ -1,0 +1,25 @@
+# Student information and runtime files must never be committed.
+data/
+files/
+uploads/
+backups/
+course-backups/
+*.db
+*.db-*
+*.sqlite*
+ai.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+# Local environments and generated state
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+*.zip
+*.tar.gz
+.DS_Store
