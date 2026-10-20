@@ -31,3 +31,26 @@ views.review=async()=>{
   document.querySelectorAll('[data-cancel-review]').forEach(b=>b.onclick=busy(async()=>{await api('/teacher/review-jobs/'+b.dataset.cancelReview,'DELETE');toast('已取消尚未开始的任务');await show('review')}));
  }};
 };
+
+// Delegated controls work in both the legacy and four-round assignment lists.
+document.addEventListener('click',e=>{
+ if(user?.role!=='teacher'||!e.target.closest('[data-delete-assignment],[data-deleted-assignments],[data-restore-assignment]'))return;
+ return busy(async e=>{
+ if(user?.role!=='teacher')return;
+ const remove=e.target.closest('[data-delete-assignment]');
+ if(remove){
+  if(!confirm('删除这项作业？学生将无法继续提交，排队的AI任务会取消。历史稿件和成绩保留，可在“已删除作业”中恢复。'))return;
+  remove.disabled=true;
+  try{await api('/assignments/'+remove.dataset.deleteAssignment,'DELETE');toast('作业已删除，历史记录保留，可恢复');await show('assignments')}finally{remove.disabled=false}
+  return;
+ }
+ const deleted=e.target.closest('[data-deleted-assignments]');
+ if(deleted){
+  const rows=await api('/teacher/assignments/deleted');
+  modal('已删除作业',rows.length?'<p class="small muted">删除后从作业和成绩统计中移除；恢复后原稿件、成绩和四轮进度重新可见，取消的AI排队任务不会自动恢复。</p>'+rows.map(a=>`<article class="card" style="margin-bottom:12px"><h3>${esc(a.title)}</h3><p>删除时间：${esc(a.deleted_at)} · ${a.submissions}份学生提交</p><button data-restore-assignment="${a.id}">恢复作业</button></article>`).join(''):'<div class="empty">没有已删除的作业。</div>');
+  return;
+ }
+ const restore=e.target.closest('[data-restore-assignment]');
+ if(restore){restore.disabled=true;try{await api('/teacher/assignments/'+restore.dataset.restoreAssignment+'/restore','POST');$('#modal').close();toast('作业已恢复');await show('assignments')}finally{restore.disabled=false}}
+})(e);
+});

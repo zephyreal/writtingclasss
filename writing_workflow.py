@@ -146,7 +146,7 @@ def run_review(sid):
         return False
 
 def assignment(c,aid):
-    a=c.execute('SELECT * FROM assignments WHERE id=? AND workflow=1',(aid,)).fetchone()
+    a=c.execute('SELECT * FROM assignments WHERE id=? AND workflow=1 AND deleted_at=""',(aid,)).fetchone()
     if not a:raise HTTPException(404,'四轮作业不存在')
     return dict(a)
 

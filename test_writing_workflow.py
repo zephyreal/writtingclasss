@@ -155,3 +155,43 @@ def test_responses_surveys_and_manual_fallback(setup):
     assert t.put(endpoint,json=draft).status_code==200
     assert detail(other,aid)['briefings'][0]['round_no']==4
     assert all('round_id' not in slide for slide in detail(other,aid)['briefings'][0]['slides'])
+
+def test_teacher_delete_restore_keeps_versions_and_cancels_queue(setup,monkeypatch):
+    t,s,other,aid,calls=setup
+    assert s.delete(f'/api/assignments/{aid}').status_code==403
+    assert upload(s,aid,1).status_code==200
+    d=detail(s,aid);sid=d['submission_id'];rid=d['rounds'][0]['id']
+    jid=a.REVIEW_QUEUE.enqueue(sid,wake=False)
+    assert t.delete(f'/api/assignments/{aid}').json()['cancelled_jobs']==1
+    assert not any(x['id']==aid for x in s.get('/api/assignments').json())
+    assert not any(x['id']==sid for x in t.get('/api/teacher/submissions').json())
+    assert s.get(f'/api/writing/assignments/{aid}').status_code==404
+    assert upload(s,aid,1,replace='true').status_code==404
+    assert t.post(f'/api/teacher/submissions/{sid}/ai').status_code==400 # API not configured
+    with pytest.raises(a.HTTPException):a.REVIEW_QUEUE.enqueue(sid,wake=False)
+    with a.db() as c:
+        assert c.execute('SELECT state FROM paper_review_jobs WHERE id=?',(jid,)).fetchone()[0]=='cancelled'
+        assert c.execute('SELECT 1 FROM writing_rounds WHERE id=?',(rid,)).fetchone()
+    assert t.get('/api/teacher/assignments/deleted').json()[0]['id']==aid
+    assert t.post(f'/api/teacher/assignments/{aid}/restore').status_code==200
+    assert len(detail(s,aid)['rounds'])==1
+    with a.db() as c:c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(sid,))
+    assert t.delete(f'/api/assignments/{aid}').status_code==409
+    with a.db() as c:c.execute("UPDATE submissions SET status='待批改' WHERE id=?",(sid,))
+    assert t.delete(f'/api/assignments/{aid}').status_code==200
+    assert t.delete(f'/api/assignments/{aid}').status_code==404
+
+def test_delete_published_legacy_grade_excluded_and_restored(setup):
+    t,s,other,_,calls=setup
+    aid=t.post('/api/assignments',json={'title':'普通作业','instructions':'写作练习'}).json()['id']
+    assert s.post('/api/submissions',data={'assignment_id':aid},files={'file':('paper.docx',doc())}).status_code==200
+    sid=next(x['submission']['id'] for x in s.get('/api/assignments').json() if x['id']==aid)
+    assert t.post(f'/api/teacher/submissions/{sid}/grade',json={'score':88,'feedback':'原评语','published':True}).status_code==200
+    assert t.delete(f'/api/assignments/{aid}').status_code==200
+    with a.db() as c:
+        assert c.execute('SELECT score FROM submissions WHERE id=?',(sid,)).fetchone()[0]==88
+    uid=s.get('/api/me').json()['id']
+    assert next(x for x in t.get('/api/teacher/students').json() if x['id']==uid)['assignment_score'] is None
+    assert s.post('/api/submissions',data={'assignment_id':aid},files={'file':('paper.docx',doc())}).status_code==404
+    assert t.post(f'/api/teacher/assignments/{aid}/restore').status_code==200
+    assert next(x for x in t.get('/api/teacher/students').json() if x['id']==uid)['assignment_score']==88

@@ -1,6 +1,6 @@
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert');
-const nodes=new Map();function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,value:'',style:{},addEventListener(){},showModal(){},close(){}});return nodes.get(s)}
-const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener(){}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
+const nodes=new Map(),clicks=[];function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,value:'',style:{},addEventListener(){},showModal(){},close(){}});return nodes.get(s)}
+const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener:(name,fn)=>{if(name==='click')clicks.push(fn)}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
 for(const file of ['app.js','english.js','teacher-writing.js','writing-workflow.js'])vm.runInContext(fs.readFileSync(__dirname+'/static/'+file,'utf8'),ctx);
 ctx.assignment={id:2,title:'研究问题 <script>',instructions:'科研写作',workflow:1,deadline:'',rubric:[]};
 vm.runInContext("user={role:'student'};api=async()=>[assignment]",ctx);
@@ -16,6 +16,7 @@ vm.runInContext("user={role:'student'};api=async()=>[assignment]",ctx);
  assert(html.includes('确认提交第 2 轮')&&html.includes('我的决定')&&html.includes('历次文档与反馈'));
  assert(!html.includes('教师确认成绩')&&!html.includes('终稿建议分'));
  vm.runInContext("user={role:'teacher'};api=async()=>[assignment]",ctx);result=await vm.runInContext('views.assignments()',ctx);
- assert(result.html.includes('第1轮讲评')&&result.html.includes('第4轮讲评'));
+ assert(result.html.includes('第1轮讲评')&&result.html.includes('第4轮讲评')&&result.html.includes('data-delete-assignment=')&&result.html.includes('已删除作业'));
+ let prevented=false;for(const handler of clicks)await handler({target:{closest:()=>null},preventDefault(){prevented=true}});assert(!prevented,'普通链接点击不可被删除处理器阻止');
  console.log('Four-round task rendering, response choices, escaped content and teacher briefing entry checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

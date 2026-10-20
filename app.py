@@ -72,6 +72,7 @@ def init():
         if 'grading_instructions' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN grading_instructions TEXT NOT NULL DEFAULT ''")
         if 'revision' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         if 'workflow' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN workflow INTEGER NOT NULL DEFAULT 0')
+        if 'deleted_at' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
         writing_workflow.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
@@ -283,7 +284,7 @@ def learner_profile(uid,c,include_private=False):
     unseen=[m for m in modules if m['mastery'] is None]
     rec=weak[:2] or unseen[:2] or sorted(modules,key=lambda x:x['mastery'])[:2]
     writing=[]
-    for row in c.execute("SELECT s.id,s.ai_json,s.published,s.returned,s.created,s.status,a.title FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.user_id=? ORDER BY s.created DESC LIMIT 5",(uid,)):
+    for row in c.execute("SELECT s.id,s.ai_json,s.published,s.returned,s.created,s.status,a.title FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.user_id=? AND a.deleted_at='' ORDER BY s.created DESC LIMIT 5",(uid,)):
         if row['ai_json'] and (include_private or row['published'] or row['returned']):
             ai=json.loads(row['ai_json'])
             writing.append({'submission_id':row['id'],'title':row['title'],'created':row['created'],'source':'教师已发布的作业反馈' if row['published'] else ('已退回稿件的形式预审' if row['returned'] else 'AI初评，待教师复核'),'dimensions':ai.get('dimensions',[]),'triage':ai.get('triage',{}),'formal_check':ai.get('formal_check')})
@@ -364,7 +365,7 @@ def submission_deletable(c,s):
 @app.get('/api/assignments')
 def assignments(u=Depends(current)):
     with db() as c:
-        result=[dict(r) for r in c.execute('SELECT * FROM assignments ORDER BY id DESC')]
+        result=[dict(r) for r in c.execute("SELECT * FROM assignments WHERE deleted_at='' ORDER BY id DESC")]
         for a in result:
             a['rubric']=json.loads(a['rubric'])
             s=c.execute('SELECT id,filename,created,status,score,feedback,published,returned,return_reason,returned_at,appeal_reason,ai_json FROM submissions WHERE assignment_id=? AND user_id=?',(a['id'],u['id'])).fetchone()
@@ -415,7 +416,7 @@ def create_assignment(x:Assignment,u=Depends(teacher)):
 def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        old=c.execute('SELECT * FROM assignments WHERE id=?',(aid,)).fetchone()
+        old=c.execute("SELECT * FROM assignments WHERE id=? AND deleted_at=''",(aid,)).fetchone()
         if not old:raise HTTPException(404,'作业不存在')
         if bool(old['workflow'])!=x.workflow and c.execute('SELECT 1 FROM submissions WHERE assignment_id=?',(aid,)).fetchone():raise HTTPException(409,'已有提交的作业不能切换流程，请另建四轮作业')
         if x.expected_revision is not None and x.expected_revision!=old['revision']:raise HTTPException(409,'作业已被更新，请刷新后再编辑')
@@ -424,12 +425,41 @@ def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
         c.execute('UPDATE assignments SET title=?,instructions=?,deadline=?,grading_instructions=?,rubric=?,revision=revision+1 WHERE id=?',(x.title.strip(),x.instructions.strip(),x.deadline,x.grading_instructions,json.dumps(rubric,ensure_ascii=False) if rubric is not None else old['rubric'],aid))
         c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
     audit(u['id'],'edit-assignment',aid);return {'ok':True,'revision':old['revision']+1}
+
+@app.delete('/api/assignments/{aid}')
+def delete_assignment(aid:int,u=Depends(teacher)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        a=c.execute("SELECT * FROM assignments WHERE id=? AND deleted_at=''",(aid,)).fetchone()
+        if not a:raise HTTPException(404,'作业不存在或已删除')
+        if c.execute("SELECT 1 FROM submissions s LEFT JOIN paper_review_jobs j ON j.submission_id=s.id AND j.state='running' WHERE s.assignment_id=? AND (s.status='AI批改中' OR j.id IS NOT NULL)",(aid,)).fetchone():raise HTTPException(409,'本作业正在AI检查，请等待检查结束后再删除')
+        jobs=c.execute("SELECT j.* FROM paper_review_jobs j JOIN submissions s ON s.id=j.submission_id WHERE s.assignment_id=? AND j.state='pending'",(aid,)).fetchall()
+        for j in jobs:
+            c.execute('UPDATE submissions SET status=? WHERE id=? AND path=?',(j['previous_status'],j['submission_id'],j['path']))
+            c.execute("UPDATE paper_review_jobs SET state='cancelled',finished=?,error='教师删除作业，取消排队' WHERE id=?",(time.time(),j['id']))
+        c.execute('UPDATE assignments SET deleted_at=?,revision=revision+1 WHERE id=?',(now(),aid))
+        c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'delete-assignment',str(aid),now()))
+    return {'ok':True,'cancelled_jobs':len(jobs)}
+
+@app.get('/api/teacher/assignments/deleted')
+def deleted_assignments(u=Depends(teacher)):
+    with db() as c:
+        return [dict(r) for r in c.execute("SELECT id,title,deleted_at,(SELECT COUNT(*) FROM submissions s WHERE s.assignment_id=a.id) submissions FROM assignments a WHERE deleted_at!='' ORDER BY deleted_at DESC,id DESC")]
+
+@app.post('/api/teacher/assignments/{aid}/restore')
+def restore_assignment(aid:int,u=Depends(teacher)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        changed=c.execute("UPDATE assignments SET deleted_at='',revision=revision+1 WHERE id=? AND deleted_at!=''",(aid,)).rowcount
+        if not changed:raise HTTPException(404,'已删除作业不存在')
+        c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'restore-assignment',str(aid),now()))
+    return {'ok':True}
 @app.post('/api/submissions')
 async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends(current)):
     throttle('upload:'+str(u['id']),20,3600)
     if u['role']!='student':raise HTTPException(400,'请使用学生账号提交作业')
     with db() as c:
-        a=c.execute('SELECT * FROM assignments WHERE id=?',(assignment_id,)).fetchone()
+        a=c.execute("SELECT * FROM assignments WHERE id=? AND deleted_at=''",(assignment_id,)).fetchone()
         if not a:raise HTTPException(404,'作业不存在')
         if a['workflow']:raise HTTPException(409,'请使用四轮写作任务页面提交')
         old=c.execute('SELECT * FROM submissions WHERE assignment_id=? AND user_id=?',(assignment_id,u['id'])).fetchone()
@@ -441,6 +471,7 @@ async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
+            if not c.execute("SELECT 1 FROM assignments WHERE id=? AND deleted_at=''",(assignment_id,)).fetchone():raise HTTPException(404,'作业已被教师删除')
             old=c.execute('SELECT * FROM submissions WHERE assignment_id=? AND user_id=?',(assignment_id,u['id'])).fetchone()
             status='待批改'
             if old:
@@ -489,7 +520,7 @@ def submission_file(sid:int,u=Depends(current)):
 @app.get('/api/teacher/submissions')
 def all_submissions(u=Depends(teacher)):
     with db() as c:
-        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.workflow,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id ORDER BY s.id DESC')]
+        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.workflow,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id WHERE a.deleted_at="" ORDER BY s.id DESC')]
         for r in rows:r['ai']=json.loads(r.pop('ai_json')) if r['ai_json'] else None
     return rows
 class Grade(BaseModel):
@@ -500,7 +531,7 @@ class Grade(BaseModel):
 def grade(sid:int,x:Grade,u=Depends(teacher)):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        if not c.execute('SELECT 1 FROM submissions WHERE id=?',(sid,)).fetchone():raise HTTPException(404,'作业不存在')
+        if not c.execute('SELECT 1 FROM submissions WHERE id=? AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(sid,)).fetchone():raise HTTPException(404,'作业不存在')
         writing_workflow.require_final(c,sid)
         if c.execute('SELECT status FROM submissions WHERE id=?',(sid,)).fetchone()[0] in BUSY:raise HTTPException(409,'请等待AI任务结束后再保存评分')
         if c.execute('SELECT returned FROM submissions WHERE id=?',(sid,)).fetchone()[0]:raise HTTPException(409,'已退回的作业须等待学生重交后评分')
@@ -548,8 +579,8 @@ def students(u=Depends(teacher)):
         result=[dict(r) for r in c.execute("SELECT id,name,student_no,created FROM users WHERE role='student' ORDER BY student_no")]
         for r in result:
             r['practice']=progress(r['id'],c)
-            r['submitted']=c.execute('SELECT COUNT(*) FROM submissions WHERE user_id=?',(r['id'],)).fetchone()[0]
-            r['assignment_score']=c.execute('SELECT AVG(score) FROM submissions WHERE user_id=? AND published=1',(r['id'],)).fetchone()[0]
+            r['submitted']=c.execute('SELECT COUNT(*) FROM submissions WHERE user_id=? AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(r['id'],)).fetchone()[0]
+            r['assignment_score']=c.execute('SELECT AVG(score) FROM submissions WHERE user_id=? AND published=1 AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(r['id'],)).fetchone()[0]
     return result
 class Reset(BaseModel):password:str=Field(min_length=10,max_length=128)
 @app.post('/api/teacher/students/{uid}/password')
@@ -723,7 +754,7 @@ def batch_review(x:BatchReview,u=Depends(teacher)):
             if not time.time()+5<=due<=time.time()+366*86400:raise ValueError()
         except ValueError:raise HTTPException(400,'请选择未来一年内的北京时间，至少晚于当前5秒')
     with db() as c:
-        rows=c.execute('SELECT id FROM submissions WHERE (? IS NULL OR assignment_id=?) ORDER BY id',(x.assignment_id,x.assignment_id)).fetchall()
+        rows=c.execute('SELECT id FROM submissions WHERE assignment_id IN (SELECT id FROM assignments WHERE deleted_at="") AND (? IS NULL OR assignment_id=?) ORDER BY id',(x.assignment_id,x.assignment_id)).fetchall()
     queued=0
     for row in rows:
         try:REVIEW_QUEUE.enqueue(row['id'],run_at=due,wake=False);queued+=1

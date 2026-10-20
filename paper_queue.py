@@ -45,7 +45,7 @@ class ReviewQueue:
         due=time.time() if run_at is None else run_at
         with self.db() as c:
             c.execute('BEGIN IMMEDIATE')
-            s=c.execute('SELECT * FROM submissions WHERE id=?',(sid,)).fetchone()
+            s=c.execute('SELECT s.* FROM submissions s JOIN assignments a ON a.id=s.assignment_id AND a.deleted_at="" WHERE s.id=?',(sid,)).fetchone()
             if not s:raise HTTPException(404,'作业不存在')
             if s['published'] or s['returned'] or s['score'] is not None or s['feedback']:
                 raise HTTPException(409,'已发布、已退回或已有教师评分草稿的作业不加入AI队列')
@@ -77,7 +77,7 @@ class ReviewQueue:
             c.execute('BEGIN IMMEDIATE')
             job=c.execute("SELECT * FROM paper_review_jobs WHERE state='pending' AND run_at<=? ORDER BY run_at,id LIMIT 1",(stamp,)).fetchone()
             if not job:return False
-            s=c.execute('SELECT * FROM submissions WHERE id=?',(job['submission_id'],)).fetchone()
+            s=c.execute('SELECT s.* FROM submissions s JOIN assignments a ON a.id=s.assignment_id AND a.deleted_at="" WHERE s.id=?',(job['submission_id'],)).fetchone()
             if not s or s['path']!=job['path'] or s['published'] or s['returned'] or s['score'] is not None or s['feedback']:
                 c.execute("UPDATE paper_review_jobs SET state='cancelled',finished=?,error='提交已变更或已由教师处理' WHERE id=?",(stamp,job['id']))
                 return True
