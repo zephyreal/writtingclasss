@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 import pytest
 from test_app import a,student,teacher,doc
 import writing_workflow as w
+ORIGINAL_AI_CALL=a.ai_call
 
 TEXT='本文研究激光焊接速度与熔深的关系。采用三组实验测试不同速度对熔深的影响，以截面金相结果作为评价依据。结果表明在本实验条件下熔深存在差异，适用范围有待更多试验检验。'
 
@@ -195,3 +196,117 @@ def test_delete_published_legacy_grade_excluded_and_restored(setup):
     assert s.post('/api/submissions',data={'assignment_id':aid},files={'file':('paper.docx',doc())}).status_code==404
     assert t.post(f'/api/teacher/assignments/{aid}/restore').status_code==200
     assert next(x for x in t.get('/api/teacher/students').json() if x['id']==uid)['assignment_score']==88
+
+def test_invitation_required_capacity_and_revocation(setup):
+    t,s,other,aid,calls=setup
+    from test_app import client
+    anon=client();body={'name':'新学生','student_no':'invite-new01','password':'test-password-123'}
+    assert anon.post('/api/register',json=body).status_code==403
+    assert s.post('/api/teacher/invites',json={}).status_code==403
+    invitation=t.post('/api/teacher/invites',json={'label':'一人邀请码','max_uses':1,'valid_days':1}).json()
+    assert 'code' in invitation
+    assert 'code_hash' not in str(t.get('/api/teacher/access').json())
+    assert anon.post('/api/register',json={**body,'invite_code':invitation['code']}).status_code==200
+    assert anon.post('/api/register',json={**body,'student_no':'invite-new02','invite_code':invitation['code']}).status_code==403
+    second=t.post('/api/teacher/invites',json={'max_uses':10}).json()
+    assert t.delete('/api/teacher/invites/'+str(second['id'])).status_code==200
+    assert anon.post('/api/register',json={**body,'student_no':'invite-new03','invite_code':second['code']}).status_code==403
+    assert anon.post('/api/login',json={'student_no':body['student_no'],'password':body['password']}).status_code==200
+
+def test_atomic_daily_user_and_site_limits(setup):
+    t,s,other,aid,calls=setup
+    from concurrent.futures import ThreadPoolExecutor
+    uid=s.get('/api/me').json()['id'];uid2=other.get('/api/me').json()['id']
+    assert t.post('/api/teacher/access',json={'student_daily_limit':2,'site_daily_limit':3}).status_code==200
+    stamp=1900000000
+    def reserve(_):
+        try:a.reserve_ai_call(uid,stamp);return True
+        except a.DailyQuotaExceeded:return False
+    with ThreadPoolExecutor(max_workers=10) as pool:results=list(pool.map(reserve,range(10)))
+    assert sum(results)==2
+    a.reserve_ai_call(uid2,stamp)
+    with pytest.raises(a.DailyQuotaExceeded):a.reserve_ai_call(uid2,stamp)
+    a.reserve_ai_call(uid,stamp+86400) # new BJT day
+
+def test_quota_returns_429_to_student_api(setup,monkeypatch):
+    t,s,other,aid,calls=setup
+    assert t.post('/api/teacher/access',json={'student_daily_limit':0,'site_daily_limit':20}).status_code==200
+    monkeypatch.setattr(a,'ai_settings',lambda:{'key':'mock','model':'mock','base_url':'https://example.invalid'})
+    monkeypatch.setattr(a,'ai_call',ORIGINAL_AI_CALL)
+    response=s.post('/api/practice/ai?chapter_id=1')
+    assert response.status_code==429 and int(response.headers['Retry-After'])>0
+
+def test_paid_cache_and_failed_attempts_count_toward_quota(setup,monkeypatch):
+    t,s,other,aid,calls=setup
+    uid=s.get('/api/me').json()['id']
+    assert t.post('/api/teacher/access',json={'student_daily_limit':2,'site_daily_limit':20}).status_code==200
+    monkeypatch.setattr(a,'ai_settings',lambda:{'key':'mock-key','model':'mock','base_url':'https://example.invalid'})
+    original_call=ORIGINAL_AI_CALL
+    original_client=a.httpx.Client;sent=[]
+    def handler(request):
+        sent.append(1)
+        if len(sent)==2:raise a.httpx.ConnectError('network failure')
+        return a.httpx.Response(200,json={'choices':[{'message':{'content':'{"ok":true}'}}]})
+    monkeypatch.setattr(a.httpx,'Client',lambda **kw:original_client(transport=a.httpx.MockTransport(handler)))
+    payload={'nonce':'one','_usage_context':{'user_id':uid,'purpose':'quota-test'}}
+    assert original_call('test',payload)=={'ok':True}
+    assert original_call('test',payload)=={'ok':True} and len(sent)==1
+    with pytest.raises(a.httpx.ConnectError):original_call('test',{**payload,'nonce':'two'})
+    with pytest.raises(a.DailyQuotaExceeded):original_call('test',{**payload,'nonce':'three'})
+    assert len(sent)==2
+
+def test_quota_exhaustion_defers_paper_job(setup):
+    t,s,other,aid,calls=setup
+    assert upload(s,aid,1).status_code==200
+    sid=detail(s,aid)['submission_id']
+    from paper_queue import ReviewQueue
+    def quota(sid):raise a.DailyQuotaExceeded('今日额度已用完',3000)
+    q=ReviewQueue(a.db,a.POOL,quota,lambda:{'key':'mock','model':'mock'})
+    jid=q.enqueue(sid,run_at=1000,wake=False)
+    assert q.run_one(stamp=1001)
+    with a.db() as c:
+        job=c.execute('SELECT * FROM paper_review_jobs WHERE id=?',(jid,)).fetchone()
+        assert job['state']=='pending' and job['run_at']==3000
+    assert not q.run_one(stamp=2000)
+
+def test_teacher_confirm_dismiss_preserves_ai_and_audit(setup):
+    t,s,other,aid,calls=setup
+    assert upload(s,aid,1,shared='true').status_code==200
+    d=detail(s,aid);sid=d['submission_id'];rid=d['rounds'][0]['id'];assert a.run_review(sid)
+    endpoint=f'/api/teacher/writing/rounds/{rid}/issue-review'
+    body={'issue_id':'r1-i2','decision':'confirmed','reason':'教师已对照原稿核验，需要调整这条意见。'}
+    assert other.post(endpoint,json=body).status_code==403
+    assert any(x['issue']['id']=='r1-i2' for x in t.get('/api/teacher/writing/issues').json()['issues'])
+    assert t.post(endpoint,json=body).status_code==200
+    issue=detail(s,aid)['rounds'][0]['review']['issues'][1]
+    assert not issue['needs_review'] and issue['teacher_review']['decision']=='confirmed'
+    body.update(decision='dismissed',reason='再次核对，原建议不适用于本次任务。')
+    assert t.post(endpoint,json=body).status_code==200
+    assert detail(s,aid)['rounds'][0]['review']['issues'][1]['dismissed']
+    with a.db() as c:
+        raw=json.loads(c.execute('SELECT review_json FROM writing_rounds WHERE id=?',(rid,)).fetchone()[0])
+        assert raw['issues'][1]['needs_review'] is True
+        assert c.execute("SELECT COUNT(*) FROM audit WHERE target=? AND action LIKE 'writing-issue-%'",(f'{rid}/r1-i2',)).fetchone()[0]==2
+        events=c.execute('SELECT * FROM writing_issue_review_events WHERE round_id=? AND issue_id=? ORDER BY id',(rid,'r1-i2')).fetchall()
+        assert len(events)==2 and events[0]['decision']=='confirmed' and events[1]['decision']=='dismissed'
+
+def test_fourth_round_score_keeps_warning_and_partial_sum(setup):
+    t,s,other,aid,calls=setup
+    rubric=[{'name':'论证','max':70},{'name':'修改','max':30}]
+    raw={'summary':'反馈','dimensions':[{'name':'论证','score':60,'comment':'理由','quote':'引用无法匹配'},{'name':'修改','score':20,'comment':'理由','quote':TEXT[:10]}]}
+    result=w.normalize(raw,TEXT,rubric,4,[])
+    assert result['score']==80 and '引用未匹配' in result['score_warning']
+    raw['dimensions'].pop()
+    result=w.normalize(raw,TEXT,rubric,4,[])
+    assert result['score'] is None and result['partial_score']==60 and result['partial_max']==70
+    assert len(result['dimensions'])==1
+
+def test_safe_errors_and_damaged_password(setup,monkeypatch):
+    t,s,other,aid,calls=setup
+    assert not a.pwdcheck('x','damaged') and not a.pwdcheck('x',None)
+    assert upload(s,aid,1).status_code==200
+    sid=detail(s,aid)['submission_id']
+    def fail(*args):raise ValueError('/opt/private/file.docx secret internal detail')
+    monkeypatch.setattr(a,'ai_call',fail)
+    assert not a.run_review(sid)
+    assert '/opt/private' not in detail(s,aid)['status']

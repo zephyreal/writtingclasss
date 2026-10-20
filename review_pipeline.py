@@ -86,8 +86,8 @@ def normalize_score(raw,rubric,document,formal):
         if isinstance(value,str) and re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)',value.strip()):value=float(value.strip())
         if type(value) not in (float,int) or not math.isfinite(value) or not 0<=value<=criterion['max']:
             errors.append('“'+criterion['name']+'”分数不是有效的0–'+str(criterion['max'])+'数值');continue
-        comment=str(item.get('comment','')).strip()[:3000]
-        quote=str(item.get('quote','')).strip()[:1200]
+        comment=str(item.get('comment') or '').strip()[:3000]
+        quote=str(item.get('quote') or '').strip()[:1200]
         verified=bool(len(_compact(quote))>=4 and _compact(quote) in text)
         if not comment:warnings.append('“'+criterion['name']+'”缺少评分理由，请人工核对。')
         if not verified:warnings.append('“'+criterion['name']+'”引用未匹配或缺少引文，请核对评分依据。')

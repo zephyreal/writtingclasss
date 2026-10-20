@@ -8,9 +8,13 @@ from docx import Document
 
 H={'X-App-Request':'1'}
 def client():return TestClient(a.app,headers=H)
+def invitation_for_tests():
+    code='test-invite-only'
+    with a.db() as db:db.execute('INSERT OR IGNORE INTO course_invites(code_hash,label,max_uses,expires,created) VALUES(?,?,?,?,?)',(a.hashlib.sha256(code.encode()).hexdigest(),'测试专用',10000,time.time()+86400,a.now()))
+    return code
 def student(no):
-    c=client();assert c.post('/api/register',json={'name':'测试学生','student_no':no,'password':'test-password-123'}).status_code==200
-    assert c.post('/api/login',json={'student_no':no,'password':'test-password-123'}).status_code==200
+    c=client();assert c.post('/api/register',json={'name':'测试学生','student_no':no,'password':'test-password-123','invite_code':invitation_for_tests()}).status_code==200
+    assert c.post('/api/login',json={'student_no':no,'password':'test-password-123','invite_code':invitation_for_tests()}).status_code==200
     return c
 def teacher():
     with a.db() as db:
@@ -33,7 +37,7 @@ def test_auth_csrf_roles():
 
 def test_registration_validation_and_duplicate():
     s=student('reg100')
-    assert s.post('/api/register',json={'name':'学生','student_no':'reg100','password':'test-password-123'}).status_code==409
+    assert s.post('/api/register',json={'name':'学生','student_no':'reg100','password':'test-password-123','invite_code':invitation_for_tests()}).status_code==409
     assert s.post('/api/register',json={'name':'学生','student_no':'bad;id','password':'test-password-123'}).status_code==400
     assert s.post('/api/register',json={'name':'学生','student_no':'reg200','password':'short'}).status_code==422
 

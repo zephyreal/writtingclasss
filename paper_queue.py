@@ -8,6 +8,9 @@ BJT=timezone(timedelta(hours=8))
 BUSY=('AI排队中','AI批改中','AI定时待批改')
 
 class DeferReview(Exception):pass
+class DailyQuotaExceeded(ValueError):
+    def __init__(self,message,retry_at):
+        super().__init__(message);self.retry_at=retry_at
 
 
 def next_daily(clock,stamp=None):
@@ -81,7 +84,7 @@ class ReviewQueue:
             if not s or s['path']!=job['path'] or s['published'] or s['returned'] or s['score'] is not None or s['feedback']:
                 c.execute("UPDATE paper_review_jobs SET state='cancelled',finished=?,error='提交已变更或已由教师处理' WHERE id=?",(stamp,job['id']))
                 return True
-            c.execute("UPDATE paper_review_jobs SET state='running' WHERE id=?",(job['id'],))
+            c.execute("UPDATE paper_review_jobs SET state='running',error='' WHERE id=?",(job['id'],))
             c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(job['submission_id'],))
         try:
             success=self.review(job['submission_id'])
@@ -91,6 +94,11 @@ class ReviewQueue:
                 c.execute("UPDATE paper_review_jobs SET state='pending' WHERE id=?",(job['id'],))
                 c.execute("UPDATE submissions SET status='AI排队中' WHERE id=? AND path=?",(job['submission_id'],job['path']))
             return False
+        except DailyQuotaExceeded as exc:
+            with self.db() as c:
+                c.execute("UPDATE paper_review_jobs SET state='pending',run_at=?,error=? WHERE id=?",(exc.retry_at,str(exc),job['id']))
+                c.execute("UPDATE submissions SET status='AI定时待批改' WHERE id=? AND path=?",(job['submission_id'],job['path']))
+            return True
         except Exception:
             success=False;error='批改任务异常，请教师查看后重试'
             with self.db() as c:c.execute("UPDATE submissions SET status='预审需人工处理：任务异常' WHERE id=? AND path=?",(job['submission_id'],job['path']))

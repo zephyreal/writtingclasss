@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
 from review_pipeline import prepare_document, normalize_formal, normalize_score, return_reason, FORMAL_PROMPT, SCORING_PROMPT, DEFAULT_STANDARD
-from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview
+from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview, DailyQuotaExceeded
 import writing_workflow
 
 ROOT=Path(__file__).parent
@@ -46,8 +46,10 @@ def pwdhash(p):
     salt=secrets.token_hex(16)
     return salt+':'+hashlib.scrypt(p.encode(),salt=bytes.fromhex(salt),n=16384,r=8,p=1).hex()
 def pwdcheck(p,stored):
-    s,v=stored.split(':')
-    return hmac.compare_digest(v,hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=16384,r=8,p=1).hex())
+    try:
+        s,v=stored.split(':')
+        return hmac.compare_digest(v,hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=16384,r=8,p=1).hex())
+    except (ValueError,TypeError,AttributeError):return False
 def init():
     with db() as c:
         c.executescript('''
@@ -65,6 +67,10 @@ def init():
         CREATE INDEX IF NOT EXISTS attempts_idx ON attempts(user_id,question_id);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,target TEXT,created TEXT);
         CREATE TABLE IF NOT EXISTS ai_practice(id INTEGER PRIMARY KEY,user_id INTEGER,chapter_id INTEGER,payload TEXT,choice INTEGER,created TEXT);
+        CREATE TABLE IF NOT EXISTS access_policy(id INTEGER PRIMARY KEY CHECK(id=1),registration_open INTEGER NOT NULL DEFAULT 1,student_daily_limit INTEGER NOT NULL DEFAULT 8,teacher_daily_limit INTEGER NOT NULL DEFAULT 100,site_daily_limit INTEGER NOT NULL DEFAULT 200);
+        INSERT OR IGNORE INTO access_policy(id) VALUES(1);
+        CREATE TABLE IF NOT EXISTS course_invites(id INTEGER PRIMARY KEY AUTOINCREMENT,code_hash TEXT UNIQUE NOT NULL,label TEXT NOT NULL,max_uses INTEGER NOT NULL,uses INTEGER NOT NULL DEFAULT 0,expires REAL NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ai_daily_quota(day TEXT,user_id INTEGER,calls INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,user_id));
         ''')
         c.execute("CREATE TABLE IF NOT EXISTS learner_profiles(user_id INTEGER PRIMARY KEY REFERENCES users(id),research_area TEXT DEFAULT '',writing_stage TEXT DEFAULT '选题阶段',goal TEXT DEFAULT '',teacher_note TEXT DEFAULT '',updated TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS submission_history(id INTEGER PRIMARY KEY,submission_id INTEGER,user_id INTEGER,path TEXT,filename TEXT,snapshot TEXT,archived TEXT)")
@@ -128,20 +134,77 @@ class Register(BaseModel):
     name:str=Field(min_length=2,max_length=40)
     student_no:str=Field(min_length=4,max_length=30)
     password:str=Field(min_length=10,max_length=128)
+    invite_code:str=Field(default='',max_length=100)
 class Login(BaseModel):
     student_no:str=Field(min_length=1,max_length=30)
     password:str=Field(min_length=1,max_length=128)
 @app.post('/api/register')
 def register(x:Register,request:Request):
-    throttle('register:'+request.client.host,20,3600)
+    throttle('register:'+request.client.host,120,3600)
     if not re.fullmatch(r'[A-Za-z0-9_-]+',x.student_no):raise HTTPException(400,'学号仅支持字母、数字、下划线和短横线')
     if not x.name.strip():raise HTTPException(400,'请填写姓名')
     try:
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if not c.execute('SELECT registration_open FROM access_policy WHERE id=1').fetchone()[0]:raise HTTPException(403,'课程注册暂未开放，请联系教师')
+            invite=c.execute('SELECT * FROM course_invites WHERE code_hash=? AND revoked=0 AND expires>? AND uses<max_uses',(hashlib.sha256(x.invite_code.strip().encode()).hexdigest(),time.time())).fetchone()
+            if not invite:raise HTTPException(403,'邀请码无效、已过期或名额已用完，请联系教师')
             uid=c.execute('INSERT INTO users(name,student_no,password,created) VALUES(?,?,?,?)',(x.name.strip(),x.student_no,pwdhash(x.password),now())).lastrowid
             c.execute('INSERT INTO learner_profiles(user_id,updated) VALUES(?,?)',(uid,now()))
+            c.execute('UPDATE course_invites SET uses=uses+1 WHERE id=?',(invite['id'],))
     except sqlite3.IntegrityError:raise HTTPException(409,'学号已注册，请登录或联系教师重置密码')
     return {'ok':True}
+
+class AccessPolicy(BaseModel):
+    registration_open:bool=True
+    student_daily_limit:int=Field(default=8,ge=0,le=100)
+    teacher_daily_limit:int=Field(default=100,ge=0,le=1000)
+    site_daily_limit:int=Field(default=200,ge=0,le=5000)
+class InviteRequest(BaseModel):
+    label:str=Field(default='课程邀请码',min_length=1,max_length=80)
+    max_uses:int=Field(default=30,ge=1,le=1000)
+    valid_days:int=Field(default=30,ge=1,le=365)
+
+@app.get('/api/teacher/access')
+def get_access(u=Depends(teacher)):
+    day=datetime.now(BJT).date().isoformat()
+    with db() as c:
+        return {'policy':dict(c.execute('SELECT * FROM access_policy WHERE id=1').fetchone()),
+                'invites':[dict(r) for r in c.execute('SELECT id,label,max_uses,uses,expires,revoked,created FROM course_invites ORDER BY id DESC LIMIT 100')],
+                'day':day,'calls':c.execute('SELECT COALESCE(SUM(calls),0) FROM ai_daily_quota WHERE day=?',(day,)).fetchone()[0]}
+
+@app.post('/api/teacher/access')
+def set_access(x:AccessPolicy,u=Depends(teacher)):
+    with db() as c:c.execute('UPDATE access_policy SET registration_open=?,student_daily_limit=?,teacher_daily_limit=?,site_daily_limit=? WHERE id=1',(int(x.registration_open),x.student_daily_limit,x.teacher_daily_limit,x.site_daily_limit))
+    audit(u['id'],'access-policy','updated');return {'ok':True}
+
+@app.post('/api/teacher/invites')
+def create_invite(x:InviteRequest,u=Depends(teacher)):
+    code=secrets.token_urlsafe(18)
+    with db() as c:i=c.execute('INSERT INTO course_invites(code_hash,label,max_uses,expires,created) VALUES(?,?,?,?,?)',(hashlib.sha256(code.encode()).hexdigest(),x.label,x.max_uses,time.time()+x.valid_days*86400,now())).lastrowid
+    audit(u['id'],'create-invite',i);return {'id':i,'code':code}
+
+@app.delete('/api/teacher/invites/{iid}')
+def revoke_invite(iid:int,u=Depends(teacher)):
+    with db() as c:
+        if not c.execute('UPDATE course_invites SET revoked=1 WHERE id=?',(iid,)).rowcount:raise HTTPException(404,'邀请码不存在')
+    audit(u['id'],'revoke-invite',iid);return {'ok':True}
+
+def reserve_ai_call(uid,stamp=None,consume=True):
+    stamp=time.time() if stamp is None else stamp
+    current_day=datetime.fromtimestamp(stamp,BJT)
+    day=current_day.date().isoformat();tomorrow=current_day.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()+86400
+    uid=int(uid or 0)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        cfg=c.execute('SELECT * FROM access_policy WHERE id=1').fetchone()
+        user=c.execute('SELECT role FROM users WHERE id=?',(uid,)).fetchone()
+        limit=cfg['teacher_daily_limit'] if user and user['role']=='teacher' else cfg['student_daily_limit']
+        used=c.execute('SELECT calls FROM ai_daily_quota WHERE day=? AND user_id=?',(day,uid)).fetchone()
+        total=c.execute('SELECT COALESCE(SUM(calls),0) FROM ai_daily_quota WHERE day=?',(day,)).fetchone()[0]
+        if total>=cfg['site_daily_limit']:raise DailyQuotaExceeded('全站今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
+        if (used['calls'] if used else 0)>=limit:raise DailyQuotaExceeded('该账号今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
+        if consume:c.execute('INSERT INTO ai_daily_quota VALUES(?,?,1) ON CONFLICT(day,user_id) DO UPDATE SET calls=calls+1',(day,uid))
 @app.post('/api/login')
 def login(x:Login,request:Request):
     throttle('login-ip:'+request.client.host,50)
@@ -645,6 +708,7 @@ def ai_call(system,payload):
         content.append({'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(Path(path).read_bytes()).decode(),'detail':'original'}})
     request={'model':cfg['model'],'messages':[{'role':'system','content':system},{'role':'user','content':content if images else text}],'response_format':{'type':'json_object'},'max_tokens':5000 if images else 2000}
     if urlparse(cfg['base_url']).hostname=='api.deepseek.com':request['thinking']={'type':'disabled'}
+    reserve_ai_call(ctx.get('user_id'))
     with httpx.Client(timeout=180,follow_redirects=False) as client:
         r=client.post(cfg['base_url']+'/chat/completions',headers={'Authorization':'Bearer '+cfg['key']},json=request)
         if r.status_code>=400:raise ValueError(f'AI服务返回 HTTP {r.status_code}，请检查接口、视觉模型或余额')
@@ -687,6 +751,7 @@ def run_review(sid):
             s=dict(c.execute('SELECT s.*,a.instructions,a.rubric,a.title assignment_title,a.grading_instructions,a.revision assignment_revision FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?',(sid,)).fetchone())
             c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(sid,))
         cfg=ai_settings()
+        reserve_ai_call(s['user_id'],consume=False)
         previous=json.loads(s['ai_json']) if s['ai_json'] else {}
         refresh_score=bool(s['ai_json'] and previous.get('score') is None)
         if urlparse(cfg['base_url']).hostname=='api.deepseek.com' and cfg.get('model')!='deepseek-flash':
@@ -711,7 +776,7 @@ def run_review(sid):
             if auto:c.execute('UPDATE submissions SET returned=1,return_reason=?,returned_at=?,published=0 WHERE id=?',(return_reason(formal),now(),sid))
         audit(s['user_id'],'auto-formal-return' if auto else 'formal-check',sid)
         return True
-    except DeferReview:raise
+    except (DeferReview,DailyQuotaExceeded):raise
     except Exception as e:
         message=str(e) if isinstance(e,ValueError) else '文档解析或网络请求失败，请教师复核'
         with db() as c:c.execute('UPDATE submissions SET status=? WHERE id=?',('预审需人工处理：'+message[:180],sid))
@@ -800,6 +865,8 @@ def ai_answer(pid:int,x:AIAnswer,u=Depends(current)):
     return {'score':100 if x.choice==q['answer'] else 0,'answer':q['answer'],'explanation':q['explanation'],'counted':False}
 @app.exception_handler(ValueError)
 async def value_error(request,exc):return JSONResponse({'detail':str(exc)},400)
+@app.exception_handler(DailyQuotaExceeded)
+async def quota_error(request,exc):return JSONResponse({'detail':str(exc)},429,headers={'Retry-After':str(max(1,int(exc.retry_at-time.time())))})
 @app.get('/healthz')
 def health():return {'ok':True}
 REVIEW_QUEUE=ReviewQueue(db,POOL,lambda sid:run_review(sid),ai_settings)

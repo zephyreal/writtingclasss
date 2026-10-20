@@ -21,6 +21,7 @@ PROMPT = '''你是研究生论文写作课的课后陪练。按教师大题目�
 只调用本次检查：第1-3轮仅给意见，不返回任何分数或等级。第4轮才按教师量规给建议分，最终由教师发布。
 首先给具体进步，再优先选择3-5项关键问题，其他最多5项。每项问题必须逐字引用当前原文，关联量规名称，写可操作的建议、一个引导问题、一个不使用虚假研究数据的简短示范。专业证据不足标uncertain=true。
 量规是标准，不能当作学术事实证据；历次原话只是追踪证据。不要声称查证文献真实性。不要因字体分页或缺少固定IMRaD结构判错。部分章节任务按教师要求，不强求完整论文。
+教师核验记录teacher_review必须尊重，已驳回意见不得继续要求学生执行；有新证据需重新标为不确定并交教师。
 历史问题逐条追踪，使用原issue_id。status只能为improved/persists/uncertain，提供当前原文quote和说明reason。未发现旧问题不能直接断言学生学会，待新材料验证。
 每轮返回一个短比较练习practice，材料用明确标注的虚构教学片段，不包含真实文献或实验数值，给两个片段、提问和参考分析，不输出学生能力标签。
 仅返回JSON：summary字符串，strengths字符串数组，issues数组[{category:论证结构/事实规范/语言表达,problem,quote,location,criterion:量规名称,suggestion,question,example,uncertain:bool}]，tracking数组[{issue_id,status,quote,reason}]，next_actions字符串数组，practice:{a,b,question,analysis}，reference_note字符串。
@@ -50,6 +51,12 @@ def migrate(c):
     CREATE TABLE IF NOT EXISTS writing_surveys(
       assignment_id INTEGER,user_id INTEGER,moment TEXT,answers TEXT,updated TEXT,
       PRIMARY KEY(assignment_id,user_id,moment));
+    CREATE TABLE IF NOT EXISTS writing_issue_reviews(
+      round_id INTEGER REFERENCES writing_rounds(id),issue_id TEXT,decision TEXT,reason TEXT,
+      reviewer INTEGER REFERENCES users(id),updated TEXT,PRIMARY KEY(round_id,issue_id));
+    CREATE TABLE IF NOT EXISTS writing_issue_review_events(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,round_id INTEGER,issue_id TEXT,decision TEXT,reason TEXT,
+      reviewer INTEGER,created TEXT);
     ''')
 
 def require_final(c,sid):
@@ -80,14 +87,15 @@ def normalize(response,text,rubric,round_no,prior):
                        'criterion':criterion if criterion in criteria else '', 'suggestion':clean(item.get('suggestion')),
                        'question':clean(item.get('question')),'example':clean(item.get('example')),
                        'evidence_located':located,'needs_review':not supported})
-    known={i['id'] for p in prior for i in p.get('issues',[])};tracking=[];seen=set()
+    historical={i['id']:i for p in prior for i in p.get('issues',[]) if not i.get('dismissed')}
+    known=set(historical);tracking=[];seen=set()
     raw=response.get('tracking',[])
     for item in (raw[:40] if isinstance(raw,list) else []):
         if not isinstance(item,dict) or item.get('issue_id') not in known or item['issue_id'] in seen:continue
         seen.add(item['issue_id']);quote=clean(item.get('quote'),800)
         located=len(compact(quote))>=4 and compact(quote) in source
-        tracking.append({'issue_id':item['issue_id'],'status':item.get('status') if located and item.get('status') in ('improved','persists') else 'uncertain','quote':quote,'reason':clean(item.get('reason'))})
-    for missing in known-seen:tracking.append({'issue_id':missing,'status':'uncertain','quote':'','reason':'本轮没有足够定位依据，需结合修改说明核对'})
+        tracking.append({'issue_id':item['issue_id'],'problem':historical[item['issue_id']].get('problem','历史修改意见'),'status':item.get('status') if located and item.get('status') in ('improved','persists') else 'uncertain','quote':quote,'reason':clean(item.get('reason'))})
+    for missing in sorted(known-seen):tracking.append({'issue_id':missing,'problem':historical[missing].get('problem','历史修改意见'),'status':'uncertain','quote':'','reason':'本轮没有足够定位依据，需结合修改说明核对'})
     p=response.get('practice');practice=None
     if isinstance(p,dict) and all(isinstance(p.get(k),str) and p[k].strip() for k in ('a','b','question','analysis')):
         practice={k:clean(p[k]) for k in ('a','b','question','analysis')}
@@ -97,10 +105,10 @@ def normalize(response,text,rubric,round_no,prior):
             'score':None,'dimensions':[],'method_card':None}
     if round_no==4:
         scoring=ENV['normalize_score'](response.get('dimensions'),rubric,{'text':text,'complete':True},{'readable':response.get('readable',True) is True})
-        # Unlocated numeric judgments remain visible to the teacher but never silently become a grade.
-        if any(not r['quote_verified'] or not r['comment'] for r in scoring['dimensions']):
-            scoring['score']=None;scoring['warning']='评分引文或理由不完整，建议分需教师复核，未计算总分。'
         result.update(score=scoring['score'],dimensions=scoring['dimensions'],score_warning=scoring['warning'])
+        result['partial_score']=round(sum(r['score'] for r in scoring['dimensions']),2) if scoring['dimensions'] else None
+        result['partial_max']=sum(r['max'] for r in scoring['dimensions'])
+        result['scoring_complete']=scoring['score'] is not None
         m=response.get('method_card',{})
         if isinstance(m,dict):result['method_card']={'improved':strings(m.get('improved')),'watch':strings(m.get('watch'))}
     return result
@@ -114,11 +122,12 @@ def run_review(sid):
             if not row:raise ValueError('本轮文件记录不存在，请教师核对')
             if row['review_json']:return True
             row=dict(row);snapshot=json.loads(row['assignment_snapshot'])
-            previous=[dict(r) for r in c.execute('SELECT round_no,review_json FROM writing_rounds WHERE assignment_id=? AND user_id=? AND round_no<? ORDER BY round_no',(row['assignment_id'],row['user_id'],row['round_no']))]
+            previous=[review_for(c,r) for r in c.execute('SELECT * FROM writing_rounds WHERE assignment_id=? AND user_id=? AND round_no<? AND review_json IS NOT NULL ORDER BY round_no',(row['assignment_id'],row['user_id'],row['round_no']))]
             c.execute("UPDATE submissions SET status='AI批改中' WHERE id=?",(sid,))
-        prior=[json.loads(r['review_json']) for r in previous if r['review_json']]
+        prior=previous
         with db() as c:
             decisions=[dict(r) for r in c.execute('SELECT w.round_no,r.issue_id,r.decision,r.reason FROM writing_responses r JOIN writing_rounds w ON w.id=r.round_id WHERE w.assignment_id=? AND w.user_id=? AND w.round_no<? ORDER BY w.round_no',(row['assignment_id'],row['user_id'],row['round_no']))]
+        ENV['reserve_ai_call'](row['user_id'],consume=False)
         with ENV['prepare_document'](row['path']) as document:
             cfg=ENV['ai_settings']()
             if cfg.get('off_peak_only') and ENV['peak'](ENV['time'].time()):raise ENV['DeferReview']()
@@ -137,9 +146,11 @@ def run_review(sid):
             c.execute('UPDATE writing_rounds SET review_json=? WHERE id=? AND review_json IS NULL',(encoded,row['id']))
             c.execute('UPDATE submissions SET ai_json=?,status=?,returned=0 WHERE id=?',(encoded,'本轮意见已生成' if row['round_no']<4 else '终稿已评，待教师发布',sid))
         return True
-    except ENV['DeferReview']:raise
+    except (ENV['DeferReview'],ENV['DailyQuotaExceeded']):raise
     except Exception as exc:
-        message=str(exc) if isinstance(exc,ValueError) else '文档解析或接口请求失败，请重试或联系教师'
+        import logging
+        logging.getLogger(__name__).exception('Writing check failed submission=%s',sid)
+        message='文档解析或接口检查未完成，请重试或联系教师；本轮文件已保留'
         with db() as c:
             c.execute('UPDATE submissions SET status=? WHERE id=?'+(' AND path=?' if row else ''),
                       ('检查未完成：'+message[:160],sid,*([row['path']] if row else [])))
@@ -153,13 +164,25 @@ def assignment(c,aid):
 def rows_for(c,aid,uid):
     return c.execute('SELECT * FROM writing_rounds WHERE assignment_id=? AND user_id=? ORDER BY round_no',(aid,uid)).fetchall()
 
-def student_round(row,published=False):
-    r={k:row[k] for k in ('id','round_no','filename','created','shared','answer')}
+def review_for(c,row):
     review=json.loads(row['review_json']) if row['review_json'] else None
+    if review:
+        decisions={r['issue_id']:dict(r) for r in c.execute('SELECT issue_id,decision,reason,updated FROM writing_issue_reviews WHERE round_id=?',(row['id'],))}
+        for i in review.get('issues',[]):
+            if i['id'] in decisions:
+                i['teacher_review']=decisions[i['id']]
+                i['dismissed']=decisions[i['id']]['decision']=='dismissed'
+                i['needs_review']=False
+    return review
+
+def student_round(row,published=False,c=None):
+    r={k:row[k] for k in ('id','round_no','filename','created','shared','answer')}
+    review=review_for(c,row) if c is not None else (json.loads(row['review_json']) if row['review_json'] else None)
     if review:
         review.pop('scoring_basis',None)
         if not published:
             review['score']=None;review['dimensions']=[];review.pop('score_warning',None)
+            review.pop('partial_score',None);review.pop('partial_max',None)
         if review.get('practice') and not r['answer']:review['practice'].pop('analysis',None)
     r['review']=review
     return r
@@ -170,8 +193,9 @@ def build_brief(c,aid,number):
     count=Counter();examples=[];reviewed=0;uncertain=0
     for row in rows:
         if not row['review_json']:continue
-        reviewed+=1;r=json.loads(row['review_json']);cats=set()
+        reviewed+=1;r=review_for(c,row);cats=set()
         for issue in r.get('issues',[]):
+            if issue.get('dismissed'):continue
             if issue.get('needs_review'):uncertain+=1;continue
             cats.add(issue['criterion'] or issue['category'])
             # Consent is not anonymization: snippets need teacher selection and manual review before export.
@@ -203,6 +227,10 @@ class Survey(BaseModel):
     moment:str=Field(pattern='^(before|after)$')
     answers:list[int]=Field(min_length=3,max_length=3)
 class ManualFeedback(BaseModel):feedback:str=Field(min_length=10,max_length=6000)
+class IssueDecision(BaseModel):
+    issue_id:str=Field(max_length=60)
+    decision:str=Field(pattern='^(confirmed|dismissed)$')
+    reason:str=Field(min_length=5,max_length=2000)
 class MethodCard(BaseModel):reminders:list[str]=Field(min_length=3,max_length=3)
 class Slide(BaseModel):
     title:str=Field(min_length=1,max_length=60)
@@ -225,7 +253,7 @@ def register(app,env):
             a=assignment(c,aid);rows=rows_for(c,aid,u['id'])
             s=c.execute('SELECT * FROM submissions WHERE assignment_id=? AND user_id=?',(aid,u['id'])).fetchone()
             method=c.execute('SELECT * FROM writing_method_cards WHERE assignment_id=? AND user_id=?',(aid,u['id'])).fetchone()
-            rounds=[student_round(r,bool(s and s['published'])) for r in rows]
+            rounds=[student_round(r,bool(s and s['published']),c) for r in rows]
             for r in rounds:r['responses']=[dict(x) for x in c.execute('SELECT issue_id,decision,reason FROM writing_responses WHERE round_id=?',(r['id'],))]
             surveys=[dict(r) for r in c.execute('SELECT moment,answers FROM writing_surveys WHERE assignment_id=? AND user_id=?',(aid,u['id']))]
             briefings=[]
@@ -247,9 +275,34 @@ def register(app,env):
             if not s:raise HTTPException(404,'作业不存在')
             a=assignment(c,s['assignment_id']);rows=rows_for(c,s['assignment_id'],s['user_id'])
             result=dict(s);result.pop('path',None);result.pop('ai_json',None)
-            result['rounds']=[{**student_round(r,True),'review':json.loads(r['review_json']) if r['review_json'] else None} for r in rows]
+            result['rounds']=[student_round(r,True,c) for r in rows]
             result['assignment']=a
         return result
+
+    @app.get('/api/teacher/writing/issues')
+    def pending_issues(u=Depends(teacher)):
+        with db() as c:
+            rows=c.execute("SELECT w.*,u.name,u.student_no,a.title FROM writing_rounds w JOIN users u ON u.id=w.user_id JOIN assignments a ON a.id=w.assignment_id WHERE a.deleted_at='' AND w.review_json IS NOT NULL ORDER BY w.id DESC LIMIT 500").fetchall()
+            result=[]
+            for row in rows:
+                for issue in review_for(c,row).get('issues',[]):
+                    if issue.get('needs_review') and not issue.get('dismissed'):result.append({'round_id':row['id'],'round_no':row['round_no'],'name':row['name'],'student_no':row['student_no'],'title':row['title'],'issue':issue})
+            return {'issues':result,'rounds_scanned':len(rows),'scan_limit':500}
+
+    @app.post('/api/teacher/writing/rounds/{rid}/issue-review')
+    def decide_issue(rid:int,x:IssueDecision,u=Depends(teacher)):
+        if not x.reason.strip():raise HTTPException(400,'请填写核验理由')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT w.* FROM writing_rounds w JOIN assignments a ON a.id=w.assignment_id WHERE w.id=? AND a.deleted_at=''",(rid,)).fetchone()
+            if not row or not row['review_json']:raise HTTPException(404,'反馈不存在')
+            issue=next((i for i in json.loads(row['review_json']).get('issues',[]) if i['id']==x.issue_id),None)
+            if not issue or not issue.get('needs_review'):raise HTTPException(404,'待核验意见不存在')
+            c.execute('INSERT OR REPLACE INTO writing_issue_reviews VALUES(?,?,?,?,?,?)',(rid,x.issue_id,x.decision,x.reason.strip(),u['id'],env['now']()))
+            c.execute('INSERT INTO writing_issue_review_events(round_id,issue_id,decision,reason,reviewer,created) VALUES(?,?,?,?,?,?)',(rid,x.issue_id,x.decision,x.reason.strip(),u['id'],env['now']()))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'writing-issue-'+x.decision,f'{rid}/{x.issue_id}',env['now']()))
+            c.execute('DELETE FROM writing_briefings WHERE assignment_id=? AND round_no=?',(row['assignment_id'],row['round_no']))
+        return {'ok':True}
 
     @app.post('/api/writing/assignments/{aid}/submit')
     async def submit(aid:int,round_no:int=Form(...),shared:bool=Form(False),replace:bool=Form(False),file:UploadFile=File(...),u=Depends(current)):
