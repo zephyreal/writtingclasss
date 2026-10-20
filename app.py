@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import httpx
 from review_pipeline import prepare_document, normalize_formal, normalize_score, return_reason, FORMAL_PROMPT, SCORING_PROMPT, DEFAULT_STANDARD
 from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview
+import writing_workflow
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR', str(ROOT/'data')))
@@ -70,6 +71,8 @@ def init():
         assignment_columns={row['name'] for row in c.execute('PRAGMA table_info(assignments)')}
         if 'grading_instructions' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN grading_instructions TEXT NOT NULL DEFAULT ''")
         if 'revision' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
+        if 'workflow' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN workflow INTEGER NOT NULL DEFAULT 0')
+        writing_workflow.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
         if 'return_reason' not in columns:c.execute("ALTER TABLE submissions ADD COLUMN return_reason TEXT NOT NULL DEFAULT ''")
@@ -378,13 +381,15 @@ class Criterion(BaseModel):
     max:float=Field(gt=0,le=100)
 class Assignment(BaseModel):
     title:str=Field(min_length=1,max_length=150)
-    instructions:str=Field(min_length=1,max_length=10000)
+    instructions:str=Field(default='',max_length=10000)
     deadline:str=Field(default='',max_length=50)
     grading_instructions:str=Field(default='',max_length=8000)
     rubric:list[Criterion]|None=Field(default=None,min_length=1,max_length=10)
     expected_revision:int|None=None
+    workflow:bool=False
 
 def assignment_values(x,c):
+    if x.workflow and not x.instructions.strip():x.instructions='围绕“'+x.title.strip()+'”完成四轮递进写作。以本人真实材料或获准案例为依据，按每轮任务要求完善同一作品，不编造数据和文献。'
     if not x.title.strip() or not x.instructions.strip():raise HTTPException(400,'作业名称和要求不能为空')
     if x.deadline:
         try:
@@ -403,6 +408,7 @@ def create_assignment(x:Assignment,u=Depends(teacher)):
         rubric=assignment_values(x,c)
         if rubric is None:rubric=json.loads(c.execute('SELECT rubric FROM assignments ORDER BY id LIMIT 1').fetchone()[0])
         aid=c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created,grading_instructions) VALUES(?,?,?,?,?,?)',(x.title.strip(),x.instructions.strip(),json.dumps(rubric,ensure_ascii=False),x.deadline,now(),x.grading_instructions)).lastrowid
+        c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
     audit(u['id'],'create-assignment',aid);return {'ok':True,'id':aid}
 
 @app.put('/api/assignments/{aid}')
@@ -411,10 +417,12 @@ def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
         c.execute('BEGIN IMMEDIATE')
         old=c.execute('SELECT * FROM assignments WHERE id=?',(aid,)).fetchone()
         if not old:raise HTTPException(404,'作业不存在')
+        if bool(old['workflow'])!=x.workflow and c.execute('SELECT 1 FROM submissions WHERE assignment_id=?',(aid,)).fetchone():raise HTTPException(409,'已有提交的作业不能切换流程，请另建四轮作业')
         if x.expected_revision is not None and x.expected_revision!=old['revision']:raise HTTPException(409,'作业已被更新，请刷新后再编辑')
         if c.execute("SELECT 1 FROM submissions WHERE assignment_id=? AND status IN ('AI排队中','AI批改中') LIMIT 1",(aid,)).fetchone():raise HTTPException(409,'本作业正在AI批改，请完成或取消排队任务后再编辑')
         rubric=assignment_values(x,c)
         c.execute('UPDATE assignments SET title=?,instructions=?,deadline=?,grading_instructions=?,rubric=?,revision=revision+1 WHERE id=?',(x.title.strip(),x.instructions.strip(),x.deadline,x.grading_instructions,json.dumps(rubric,ensure_ascii=False) if rubric is not None else old['rubric'],aid))
+        c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
     audit(u['id'],'edit-assignment',aid);return {'ok':True,'revision':old['revision']+1}
 @app.post('/api/submissions')
 async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends(current)):
@@ -423,6 +431,7 @@ async def submit(assignment_id:int=Form(...),file:UploadFile=File(...),u=Depends
     with db() as c:
         a=c.execute('SELECT * FROM assignments WHERE id=?',(assignment_id,)).fetchone()
         if not a:raise HTTPException(404,'作业不存在')
+        if a['workflow']:raise HTTPException(409,'请使用四轮写作任务页面提交')
         old=c.execute('SELECT * FROM submissions WHERE assignment_id=? AND user_id=?',(assignment_id,u['id'])).fetchone()
         if old and not old['returned']:raise HTTPException(409,'此作业已提交；如需重交请联系教师退回')
         # Returned submissions may be revised after the original deadline.
@@ -459,6 +468,7 @@ def delete_submission(sid:int,u=Depends(current)):
         c.execute('BEGIN IMMEDIATE')
         s=c.execute('SELECT * FROM submissions WHERE id=? AND user_id=?',(sid,u['id'])).fetchone()
         if not s:raise HTTPException(404,'作业不存在')
+        if c.execute('SELECT 1 FROM writing_rounds WHERE submission_id=?',(sid,)).fetchone():raise HTTPException(409,'四轮写作请使用任务页替换未检查的文件，历史版本需要保留')
         if not submission_deletable(c,s):raise HTTPException(409,'作业已批改、正在批改或存在评阅历史，不能自行删除；如需修改请联系教师退回')
         c.execute('DELETE FROM submissions WHERE id=?',(sid,))
         c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'student-delete-submission',str(sid),now()))
@@ -479,7 +489,7 @@ def submission_file(sid:int,u=Depends(current)):
 @app.get('/api/teacher/submissions')
 def all_submissions(u=Depends(teacher)):
     with db() as c:
-        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id ORDER BY s.id DESC')]
+        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.workflow,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id ORDER BY s.id DESC')]
         for r in rows:r['ai']=json.loads(r.pop('ai_json')) if r['ai_json'] else None
     return rows
 class Grade(BaseModel):
@@ -491,6 +501,7 @@ def grade(sid:int,x:Grade,u=Depends(teacher)):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         if not c.execute('SELECT 1 FROM submissions WHERE id=?',(sid,)).fetchone():raise HTTPException(404,'作业不存在')
+        writing_workflow.require_final(c,sid)
         if c.execute('SELECT status FROM submissions WHERE id=?',(sid,)).fetchone()[0] in BUSY:raise HTTPException(409,'请等待AI任务结束后再保存评分')
         if c.execute('SELECT returned FROM submissions WHERE id=?',(sid,)).fetchone()[0]:raise HTTPException(409,'已退回的作业须等待学生重交后评分')
         c.execute('UPDATE submissions SET score=?,feedback=?,published=?,status=? WHERE id=?',(x.score,x.feedback,int(x.published),'已发布' if x.published else '教师复核中',sid))
@@ -637,6 +648,9 @@ def extract(path):
     return text
 
 def run_review(sid):
+    with db() as c:
+        workflow=c.execute('SELECT a.workflow FROM assignments a JOIN submissions s ON s.assignment_id=a.id WHERE s.id=?',(sid,)).fetchone()
+    if workflow and workflow['workflow']:return writing_workflow.run_review(sid)
     try:
         with db() as c:
             s=dict(c.execute('SELECT s.*,a.instructions,a.rubric,a.title assignment_title,a.grading_instructions,a.revision assignment_revision FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?',(sid,)).fetchone())
@@ -758,6 +772,7 @@ async def value_error(request,exc):return JSONResponse({'detail':str(exc)},400)
 @app.get('/healthz')
 def health():return {'ok':True}
 REVIEW_QUEUE=ReviewQueue(db,POOL,lambda sid:run_review(sid),ai_settings)
+writing_workflow.register(app,globals())
 
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)

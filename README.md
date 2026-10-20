@@ -1,3 +1,5 @@
+> 新增四轮论文写作陪练：前三轮反馈、第四轮评分、跨轮追踪与讲评PPT。使用和升级说明见 [WRITING_WORKFLOW.md](WRITING_WORKFLOW.md)。
+
 > 英语模块已升级为千问连续语音。升级及填写API说明见 [ENGLISH_REALTIME.md](ENGLISH_REALTIME.md)，无须安装本地语音模型。
 
 # 智学工坊 · 四课程教学平台 v1.3
