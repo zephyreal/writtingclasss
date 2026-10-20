@@ -12,6 +12,7 @@ import httpx
 from review_pipeline import prepare_document, normalize_formal, normalize_score, return_reason, FORMAL_PROMPT, SCORING_PROMPT, DEFAULT_STANDARD
 from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview, DailyQuotaExceeded
 import writing_workflow
+import adaptive_practice
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR', str(ROOT/'data')))
@@ -80,6 +81,7 @@ def init():
         if 'workflow' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN workflow INTEGER NOT NULL DEFAULT 0')
         if 'deleted_at' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
         writing_workflow.migrate(c)
+        adaptive_practice.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
         if 'return_reason' not in columns:c.execute("ALTER TABLE submissions ADD COLUMN return_reason TEXT NOT NULL DEFAULT ''")
@@ -352,6 +354,8 @@ def learner_profile(uid,c,include_private=False):
             ai=json.loads(row['ai_json'])
             writing.append({'submission_id':row['id'],'title':row['title'],'created':row['created'],'source':'教师已发布的作业反馈' if row['published'] else ('已退回稿件的形式预审' if row['returned'] else 'AI初评，待教师复核'),'dimensions':ai.get('dimensions',[]),'triage':ai.get('triage',{}),'formal_check':ai.get('formal_check')})
     result.update(modules=modules,weak_topics=[m['title'] for m in weak],recommendations=[{'chapter_id':m['id'],'title':m['title'],'level':m['recommended_level'],'reason':('尚无作答记录，先完成基础诊断' if m['mastery'] is None else f"首次正确率 {m['first_accuracy']}%，近期{m['recent_sample']}次正确率 {m['recent_accuracy']}%，建议继续巩固") } for m in rec],recent_mistakes=[{'chapter_id':r['chapter_id'],'stem':r['stem'],'explanation':r['explanation'],'created':r['created']} for r in reversed(attempts) if r['score']==0][:8],writing_reviews=writing,total_attempts=len(attempts),assessment=progress(uid,c))
+    result['timed_practice']=adaptive_practice.overview(c,uid)
+    result['timed_practice_units']=adaptive_practice.unit_profile(c,uid)
     return result
 class ProfileUpdate(BaseModel):
     research_area:str=Field(default='',max_length=200)
@@ -642,6 +646,7 @@ def students(u=Depends(teacher)):
         result=[dict(r) for r in c.execute("SELECT id,name,student_no,created FROM users WHERE role='student' ORDER BY student_no")]
         for r in result:
             r['practice']=progress(r['id'],c)
+            r['timed_practice']=adaptive_practice.overview(c,r['id'])
             r['submitted']=c.execute('SELECT COUNT(*) FROM submissions WHERE user_id=? AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(r['id'],)).fetchone()[0]
             r['assignment_score']=c.execute('SELECT AVG(score) FROM submissions WHERE user_id=? AND published=1 AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(r['id'],)).fetchone()[0]
     return result
@@ -657,8 +662,8 @@ def reset(uid:int,x:Reset,u=Depends(teacher)):
 def export(u=Depends(teacher)):
     rows=students(u)
     f=io.StringIO();f.write('\ufeff');w=csv.writer(f)
-    w.writerow(['学号','姓名','练习完成题数','统一题库题数','练习平时成绩(未答计0)','已交作业数','已发布作业平均分'])
-    for r in rows:w.writerow([("'"+r['student_no']),r['name'] if not r['name'].startswith(('=','+','-','@')) else "'"+r['name'],r['practice']['done'],r['practice']['total'],r['practice']['score'],r['submitted'],r['assignment_score']])
+    w.writerow(['学号','姓名','练习完成题数','统一题库题数','练习平时成绩(未答计0)','已交作业数','已发布作业平均分','30题练习完成轮次','30题练习累计正确率','30题练习超时题数'])
+    for r in rows:w.writerow([("'"+r['student_no']),r['name'] if not r['name'].startswith(('=','+','-','@')) else "'"+r['name'],r['practice']['done'],r['practice']['total'],r['practice']['score'],r['submitted'],r['assignment_score'],r['timed_practice']['rounds'],r['timed_practice']['accuracy'],r['timed_practice']['timeouts']])
     return StreamingResponse(iter([f.getvalue()]),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=grades.csv'})
 
 def ai_settings():
@@ -707,9 +712,10 @@ def ai_call(system,payload):
     for path in images:
         content.append({'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(Path(path).read_bytes()).decode(),'detail':'original'}})
     request={'model':cfg['model'],'messages':[{'role':'system','content':system},{'role':'user','content':content if images else text}],'response_format':{'type':'json_object'},'max_tokens':5000 if images else 2000}
+    if ctx.get('max_tokens'):request['max_tokens']=max(100,min(2000,int(ctx['max_tokens'])))
     if urlparse(cfg['base_url']).hostname=='api.deepseek.com':request['thinking']={'type':'disabled'}
     reserve_ai_call(ctx.get('user_id'))
-    with httpx.Client(timeout=180,follow_redirects=False) as client:
+    with httpx.Client(timeout=min(180,max(5,float(ctx.get('timeout',180)))),follow_redirects=False) as client:
         r=client.post(cfg['base_url']+'/chat/completions',headers={'Authorization':'Bearer '+cfg['key']},json=request)
         if r.status_code>=400:raise ValueError(f'AI服务返回 HTTP {r.status_code}，请检查接口、视觉模型或余额')
         data=r.json();log(data.get('usage',{}),False)
@@ -871,6 +877,7 @@ async def quota_error(request,exc):return JSONResponse({'detail':str(exc)},429,h
 def health():return {'ok':True}
 REVIEW_QUEUE=ReviewQueue(db,POOL,lambda sid:run_review(sid),ai_settings)
 writing_workflow.register(app,globals())
+adaptive_practice.register(app,globals())
 
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)

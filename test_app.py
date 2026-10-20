@@ -258,9 +258,10 @@ with app.db() as c:
     (code/'app.py').write_text(Path(a.__file__).read_text())
     (code/'review_pipeline.py').write_text((Path(a.__file__).parent/'review_pipeline.py').read_text())
     import shutil
-    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py'):
+    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py','adaptive_practice.py','practice_bank.py'):
         shutil.copy2(Path(a.__file__).parent/module,code/module)
     shutil.copytree(Path(a.__file__).parent/'vendor',code/'vendor',dirs_exist_ok=True)
+    shutil.copytree(Path(a.__file__).parent/'question_bank',code/'question_bank',dirs_exist_ok=True)
     verify="""import app,json
 with app.db() as c:
  u=c.execute('SELECT * FROM users WHERE id=101').fetchone()
