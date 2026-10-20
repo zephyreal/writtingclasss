@@ -202,8 +202,8 @@ def reserve_ai_call(uid,stamp=None,consume=True):
         limit=cfg['teacher_daily_limit'] if user and user['role']=='teacher' else cfg['student_daily_limit']
         used=c.execute('SELECT calls FROM ai_daily_quota WHERE day=? AND user_id=?',(day,uid)).fetchone()
         total=c.execute('SELECT COALESCE(SUM(calls),0) FROM ai_daily_quota WHERE day=?',(day,)).fetchone()[0]
-        if total>=cfg['site_daily_limit']:raise DailyQuotaExceeded('全站今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
-        if (used['calls'] if used else 0)>=limit:raise DailyQuotaExceeded('该账号今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
+        if total>=cfg['site_daily_limit']:raise DailyQuotaExceeded('教师已暂停全站模型请求，请联系教师' if cfg['site_daily_limit']==0 else '全站今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
+        if (used['calls'] if used else 0)>=limit:raise DailyQuotaExceeded('教师已暂停此类账号的模型请求，请联系教师' if limit==0 else '该账号今日模型请求额度已用完，将在北京时间次日恢复',tomorrow)
         if consume:c.execute('INSERT INTO ai_daily_quota VALUES(?,?,1) ON CONFLICT(day,user_id) DO UPDATE SET calls=calls+1',(day,uid))
 @app.post('/api/login')
 def login(x:Login,request:Request):
