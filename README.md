@@ -1,10 +1,12 @@
-> 新增四轮论文写作陪练：前三轮反馈、第四轮评分、跨轮追踪与讲评PPT。使用和升级说明见 [WRITING_WORKFLOW.md](WRITING_WORKFLOW.md)。
+> 新增四轮论文写作陪练：四轮分别评分、教师配置权重、跨轮追踪与讲评PPT。使用和升级说明见 [WRITING_WORKFLOW.md](WRITING_WORKFLOW.md)。
 
 > 英语模块已升级为千问连续语音。升级及填写API说明见 [ENGLISH_REALTIME.md](ENGLISH_REALTIME.md)，无须安装本地语音模型。
 
 # 智学工坊 · 四课程教学平台
 
 更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+新增[学生管理、课程邀请码和四轮成绩](COURSE_ADMIN.md)：注册填写电话，按课程授权，教师删除重复账号、标记AI科研PPT分享并设置四轮成绩权重。
 
 2026-11-10：[八个PPT目录与网页题库已对齐](PPT_CURRICULUM.md)，现有网站升级时自动更新单元标题与简介，并保留历史数据。
 

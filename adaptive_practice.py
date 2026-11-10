@@ -200,12 +200,12 @@ def register(app,env):
 
     @app.get('/api/teacher/practice/students')
     def students(u=Depends(teacher)):
-        with db() as c:return [{**dict(s),'practice':overview(c,s['id'])} for s in c.execute("SELECT id,name,student_no FROM users WHERE role='student' ORDER BY student_no")]
+        with db() as c:return [{**dict(s),'practice':overview(c,s['id'])} for s in c.execute("SELECT id,name,student_no FROM users WHERE role='student' AND deleted_at='' ORDER BY student_no")]
 
     @app.get('/api/teacher/practice/students/{uid}')
     def records(uid:int,u=Depends(teacher)):
         with db() as c:
-            s=c.execute("SELECT id,name,student_no FROM users WHERE id=? AND role='student'",(uid,)).fetchone()
+            s=c.execute("SELECT id,name,student_no FROM users WHERE id=? AND role='student' AND deleted_at=''",(uid,)).fetchone()
             if not s:raise HTTPException(404,'学生不存在')
             return {'student':dict(s),'summary':overview(c,uid),'records':[summary(r) for r in c.execute('SELECT * FROM practice_runs WHERE user_id=? ORDER BY id DESC LIMIT 200',(uid,))]}
 
@@ -234,7 +234,7 @@ def register(app,env):
     def reset(uid:int,x:Management,u=Depends(teacher)):
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student'",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
+            if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student' AND deleted_at=''",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
             count=c.execute('DELETE FROM practice_runs WHERE user_id=?',(uid,)).rowcount;invalidate(c,uid)
             c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'practice-reset',json.dumps({'student':uid,'records':count,'reason':x.reason},ensure_ascii=False),env['now']()))
         return {'ok':True,'deleted':count}

@@ -408,6 +408,7 @@ def register(app, db, current, teacher, ai_call, ai_settings, throttle, data):
             raise HTTPException(503,'课后文字评分使用原AI接口，请教师在论文课程的AI接口设置中配置DeepSeek等文字模型')
         with db() as c:
             c.execute('BEGIN IMMEDIATE');s=ownership(c,sid,uid)
+            if not c.execute("SELECT 1 FROM users WHERE id=? AND deleted_at=''",(uid,)).fetchone():raise HTTPException(404,'学生账号已删除')
             if not s['ended']: raise HTTPException(409,'请先结束本次通话')
             if c.execute('SELECT 1 FROM english_record_issues WHERE session_id=?',(sid,)).fetchone():
                 raise HTTPException(409,'该通话报告过学生转写失败，请教师核查并人工评分')
@@ -430,7 +431,7 @@ def register(app, db, current, teacher, ai_call, ai_settings, throttle, data):
         try:
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                job=c.execute("SELECT * FROM english_assessments WHERE status='queued' ORDER BY updated LIMIT 1").fetchone()
+                job=c.execute("SELECT a.* FROM english_assessments a JOIN english_sessions s ON s.id=a.session_id JOIN users u ON u.id=s.user_id WHERE a.status='queued' AND u.deleted_at='' ORDER BY a.updated LIMIT 1").fetchone()
                 if not job: return False
                 job=dict(job);sid=job['session_id']
                 c.execute("UPDATE english_assessments SET status='running',updated=? WHERE session_id=?",(time.time(),sid))
@@ -489,7 +490,7 @@ def register(app, db, current, teacher, ai_call, ai_settings, throttle, data):
     @app.get('/api/teacher/english/sessions')
     def teacher_sessions(u=Depends(teacher),before:int=0,user_id:int=0):
         with db() as c:
-            rows=[dict(r) for r in c.execute('SELECT s.id,s.user_id,s.topic,s.created,s.ended,u.name,u.student_no FROM english_sessions s JOIN users u ON u.id=s.user_id WHERE (?=0 OR s.id<?) AND (?=0 OR s.user_id=?) ORDER BY s.id DESC LIMIT 100',(before,before,user_id,user_id))]
+            rows=[dict(r) for r in c.execute('SELECT s.id,s.user_id,s.topic,s.created,s.ended,u.name,u.student_no FROM english_sessions s JOIN users u ON u.id=s.user_id WHERE u.deleted_at="" AND (?=0 OR s.id<?) AND (?=0 OR s.user_id=?) ORDER BY s.id DESC LIMIT 100',(before,before,user_id,user_id))]
         for r in rows:
             r['topic']={k:v for k,v in json.loads(r['topic']).items() if k not in ('persona','goal')}
             r['assessment']=assessment_view(r['id'],teacher_view=True)
@@ -776,7 +777,7 @@ def register(app, db, current, teacher, ai_call, ai_settings, throttle, data):
 
     @app.get('/api/teacher/english/students')
     def teacher_students(u=Depends(teacher)):
-        with db() as c:students=[dict(r) for r in c.execute("SELECT id,name,student_no FROM users WHERE role='student' AND id IN (SELECT user_id FROM english_sessions) ORDER BY student_no")]
+        with db() as c:students=[dict(r) for r in c.execute("SELECT id,name,student_no FROM users WHERE role='student' AND deleted_at='' AND id IN (SELECT user_id FROM english_sessions) ORDER BY student_no")]
         result=[]
         for s in students:
             with db() as c:grade=dict(c.execute('SELECT AVG(a.teacher_score) average,COUNT(*) published_count FROM english_assessments a JOIN english_sessions es ON es.id=a.session_id WHERE es.user_id=? AND a.published=1 AND a.teacher_score IS NOT NULL',(s['id'],)).fetchone())

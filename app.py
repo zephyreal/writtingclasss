@@ -13,6 +13,8 @@ from review_pipeline import prepare_document, normalize_formal, normalize_score,
 from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview, DailyQuotaExceeded
 import writing_workflow
 import adaptive_practice
+import course_access
+import writing_scores
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR', str(ROOT/'data')))
@@ -80,7 +82,9 @@ def init():
         if 'revision' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         if 'workflow' not in assignment_columns:c.execute('ALTER TABLE assignments ADD COLUMN workflow INTEGER NOT NULL DEFAULT 0')
         if 'deleted_at' not in assignment_columns:c.execute("ALTER TABLE assignments ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
+        course_access.migrate(c,now())
         writing_workflow.migrate(c)
+        writing_scores.migrate(c)
         adaptive_practice.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
@@ -107,6 +111,12 @@ async def guard(request,call_next):
         if request.headers.get('X-App-Request')!='1':return JSONResponse({'detail':'请求校验失败，请刷新页面'},403)
         origin=request.headers.get('origin')
         if origin and urlparse(origin).netloc!=request.headers.get('host'):return JSONResponse({'detail':'不允许跨站请求'},403)
+    cid=course_access.gated_course(request.url.path)
+    if cid:
+        try:
+            actor=current(request)
+            with db() as c:course_access.require_course(c,actor,cid)
+        except HTTPException as exc:return JSONResponse({'detail':exc.detail},exc.status_code)
     result=await call_next(request)
     result.headers['X-Content-Type-Options']='nosniff'
     result.headers['Referrer-Policy']='same-origin'
@@ -124,7 +134,7 @@ def throttle(bucket,limit,window=600):
 def current(request:Request):
     token=request.cookies.get('session','')
     with db() as c:
-        u=c.execute('SELECT u.id,u.name,u.student_no,u.role FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
+        u=c.execute('SELECT u.id,u.name,u.student_no,u.role,u.phone FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>? AND u.deleted_at=""',(hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
     if not u:raise HTTPException(401,'请先登录')
     return dict(u)
 def teacher(u=Depends(current)):
@@ -139,6 +149,7 @@ class Register(BaseModel):
     student_no:str=Field(min_length=4,max_length=30)
     password:str=Field(min_length=10,max_length=128)
     invite_code:str=Field(default='',max_length=100)
+    phone:str=Field(min_length=7,max_length=30)
 class Login(BaseModel):
     student_no:str=Field(min_length=1,max_length=30)
     password:str=Field(min_length=1,max_length=128)
@@ -147,15 +158,16 @@ def register(x:Register,request:Request):
     throttle('register:'+request.client.host,120,3600)
     if not re.fullmatch(r'[A-Za-z0-9_-]+',x.student_no):raise HTTPException(400,'学号仅支持字母、数字、下划线和短横线')
     if not x.name.strip():raise HTTPException(400,'请填写姓名')
+    phone=course_access.phone_value(x.phone)
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
             if not c.execute('SELECT registration_open FROM access_policy WHERE id=1').fetchone()[0]:raise HTTPException(403,'课程注册暂未开放，请联系教师')
             invite=c.execute('SELECT * FROM course_invites WHERE code_hash=? AND revoked=0 AND expires>? AND uses<max_uses',(hashlib.sha256(x.invite_code.strip().encode()).hexdigest(),time.time())).fetchone()
             if not invite:raise HTTPException(403,'邀请码无效、已过期或名额已用完，请联系教师')
-            uid=c.execute('INSERT INTO users(name,student_no,password,created) VALUES(?,?,?,?)',(x.name.strip(),x.student_no,pwdhash(x.password),now())).lastrowid
+            uid=c.execute('INSERT INTO users(name,student_no,password,created,phone) VALUES(?,?,?,?,?)',(x.name.strip(),x.student_no,pwdhash(x.password),now(),phone)).lastrowid
             c.execute('INSERT INTO learner_profiles(user_id,updated) VALUES(?,?)',(uid,now()))
-            c.execute('UPDATE course_invites SET uses=uses+1 WHERE id=?',(invite['id'],))
+            course_access.redeem(c,uid,x.invite_code,now())
     except sqlite3.IntegrityError:raise HTTPException(409,'学号已注册，请登录或联系教师重置密码')
     return {'ok':True}
 
@@ -168,13 +180,14 @@ class InviteRequest(BaseModel):
     label:str=Field(default='课程邀请码',min_length=1,max_length=80)
     max_uses:int=Field(default=30,ge=1,le=1000)
     valid_days:int=Field(default=30,ge=1,le=365)
+    course_id:str=Field(default='writing',pattern='^(writing|english|equipment|design)$')
 
 @app.get('/api/teacher/access')
 def get_access(u=Depends(teacher)):
     day=datetime.now(BJT).date().isoformat()
     with db() as c:
         return {'policy':dict(c.execute('SELECT * FROM access_policy WHERE id=1').fetchone()),
-                'invites':[dict(r) for r in c.execute('SELECT id,label,max_uses,uses,expires,revoked,created FROM course_invites ORDER BY id DESC LIMIT 100')],
+                'invites':[dict(r) for r in c.execute('SELECT id,label,max_uses,uses,expires,revoked,created,course_id FROM course_invites ORDER BY id DESC LIMIT 100')],
                 'day':day,'calls':c.execute('SELECT COALESCE(SUM(calls),0) FROM ai_daily_quota WHERE day=?',(day,)).fetchone()[0]}
 
 @app.post('/api/teacher/access')
@@ -185,7 +198,7 @@ def set_access(x:AccessPolicy,u=Depends(teacher)):
 @app.post('/api/teacher/invites')
 def create_invite(x:InviteRequest,u=Depends(teacher)):
     code=secrets.token_urlsafe(18)
-    with db() as c:i=c.execute('INSERT INTO course_invites(code_hash,label,max_uses,expires,created) VALUES(?,?,?,?,?)',(hashlib.sha256(code.encode()).hexdigest(),x.label,x.max_uses,time.time()+x.valid_days*86400,now())).lastrowid
+    with db() as c:i=c.execute('INSERT INTO course_invites(code_hash,label,max_uses,expires,created,course_id) VALUES(?,?,?,?,?,?)',(hashlib.sha256(code.encode()).hexdigest(),x.label,x.max_uses,time.time()+x.valid_days*86400,now(),x.course_id)).lastrowid
     audit(u['id'],'create-invite',i);return {'id':i,'code':code}
 
 @app.delete('/api/teacher/invites/{iid}')
@@ -202,7 +215,8 @@ def reserve_ai_call(uid,stamp=None,consume=True):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         cfg=c.execute('SELECT * FROM access_policy WHERE id=1').fetchone()
-        user=c.execute('SELECT role FROM users WHERE id=?',(uid,)).fetchone()
+        user=c.execute('SELECT role,deleted_at FROM users WHERE id=?',(uid,)).fetchone()
+        if user and user['deleted_at']:raise HTTPException(403,'学生账号已删除，不能调用AI')
         limit=cfg['teacher_daily_limit'] if user and user['role']=='teacher' else cfg['student_daily_limit']
         used=c.execute('SELECT calls FROM ai_daily_quota WHERE day=? AND user_id=?',(day,uid)).fetchone()
         total=c.execute('SELECT COALESCE(SUM(calls),0) FROM ai_daily_quota WHERE day=?',(day,)).fetchone()[0]
@@ -214,7 +228,7 @@ def login(x:Login,request:Request):
     throttle('login-ip:'+request.client.host,50)
     throttle('login-account:'+x.student_no,15)
     with db() as c:
-        u=c.execute('SELECT * FROM users WHERE student_no=?',(x.student_no,)).fetchone()
+        u=c.execute("SELECT * FROM users WHERE student_no=? AND deleted_at=''",(x.student_no,)).fetchone()
         if not u or not pwdcheck(x.password,u['password']):raise HTTPException(401,'账号或密码不正确')
         token=secrets.token_urlsafe(40)
         c.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
@@ -227,7 +241,9 @@ def logout(request:Request):
     with db() as c:c.execute('DELETE FROM sessions WHERE token=?',(hashlib.sha256(request.cookies.get('session','').encode()).hexdigest(),))
     r=JSONResponse({'ok':True});r.delete_cookie('session');return r
 @app.get('/api/me')
-def me(u=Depends(current)):return {**u,'secure':SECURE}
+def me(u=Depends(current)):
+    with db() as c:enrolled=[r['course_id'] for r in course_access.courses_for(c,u['id'])]
+    return {**u,'courses':enrolled,'secure':SECURE}
 class Password(BaseModel):
     old:str=Field(max_length=128)
     new:str=Field(min_length=10,max_length=128)
@@ -248,7 +264,8 @@ COURSES = [
 ]
 @app.get('/api/courses')
 def course_catalog(u=Depends(current)):
-    return COURSES
+    with db() as c:enrolled={r['course_id'] for r in course_access.courses_for(c,u['id'])}
+    return [{**course,'enrolled':u['role']=='teacher' or course['id'] in enrolled} for course in COURSES]
 
 GOMOKU_ROOT=ROOT/'course_assets'/'gomoku'
 GOMOKU_FILES={'index.html','ai-worker.js','gomoku_uint8_qop_u8u8.onnx','gomoku_single.onnx','index_single_wasm118_mobile.html','index_single_wasm_abtest.html','gomoku.cpp','vct-worker.js','README.md'}
@@ -378,13 +395,13 @@ def update_profile(x:ProfileUpdate,u=Depends(current)):
 @app.get('/api/teacher/students/{uid}/profile')
 def teacher_profile(uid:int,u=Depends(teacher)):
     with db() as c:
-        person=c.execute("SELECT id,name,student_no FROM users WHERE id=? AND role='student'",(uid,)).fetchone()
+        person=c.execute("SELECT id,name,student_no FROM users WHERE id=? AND role='student' AND deleted_at=''",(uid,)).fetchone()
         if not person:raise HTTPException(404,'学生不存在')
         return {'student':dict(person),'profile':learner_profile(uid,c,True)}
 @app.post('/api/teacher/students/{uid}/profile')
 def teacher_update_profile(uid:int,x:TeacherProfileUpdate,u=Depends(teacher)):
     with db() as c:
-        if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student'",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
+        if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student' AND deleted_at=''",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
         c.execute('INSERT INTO learner_profiles(user_id,research_area,writing_stage,goal,teacher_note,updated) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET research_area=excluded.research_area,writing_stage=excluded.writing_stage,goal=excluded.goal,teacher_note=excluded.teacher_note,updated=excluded.updated',(uid,x.research_area,x.writing_stage,x.goal,x.teacher_note,now()))
     audit(u['id'],'update-profile',uid);return {'ok':True}
 
@@ -439,8 +456,12 @@ def assignments(u=Depends(current)):
         result=[dict(r) for r in c.execute("SELECT * FROM assignments WHERE deleted_at='' ORDER BY id DESC")]
         for a in result:
             a['rubric']=json.loads(a['rubric'])
+            a['round_weights']=json.loads(a['round_weights'])
             s=c.execute('SELECT id,filename,created,status,score,feedback,published,returned,return_reason,returned_at,appeal_reason,ai_json FROM submissions WHERE assignment_id=? AND user_id=?',(a['id'],u['id'])).fetchone()
             a['submission']=dict(s) if s else None
+            if s and a['workflow']:
+                a['grading']=writing_scores.aggregate(c,s['id'],public=True)
+                a['round_scores']=[{'round_no':r['round_no'],'score':r['teacher_score'] if r['grade_published'] or s['published'] else None} for r in c.execute('SELECT * FROM writing_rounds WHERE submission_id=? ORDER BY round_no',(s['id'],))]
             if s:
                 a['submission'].pop('ai_json')
                 a['submission']['can_delete']=u['role']=='student' and submission_deletable(c,s)
@@ -459,6 +480,7 @@ class Assignment(BaseModel):
     rubric:list[Criterion]|None=Field(default=None,min_length=1,max_length=10)
     expected_revision:int|None=None
     workflow:bool=False
+    round_weights:list[float]|None=Field(default=None,min_length=4,max_length=4)
 
 def assignment_values(x,c):
     if x.workflow and not x.instructions.strip():x.instructions='围绕“'+x.title.strip()+'”完成四轮递进写作。以本人真实材料或获准案例为依据，按每轮任务要求完善同一作品，不编造数据和文献。'
@@ -480,7 +502,7 @@ def create_assignment(x:Assignment,u=Depends(teacher)):
         rubric=assignment_values(x,c)
         if rubric is None:rubric=json.loads(c.execute('SELECT rubric FROM assignments ORDER BY id LIMIT 1').fetchone()[0])
         aid=c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created,grading_instructions) VALUES(?,?,?,?,?,?)',(x.title.strip(),x.instructions.strip(),json.dumps(rubric,ensure_ascii=False),x.deadline,now(),x.grading_instructions)).lastrowid
-        c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
+        c.execute('UPDATE assignments SET workflow=?,round_weights=? WHERE id=?',(int(x.workflow),json.dumps(writing_scores.weights(x.round_weights if x.round_weights is not None else writing_scores.DEFAULT_WEIGHTS)),aid))
     audit(u['id'],'create-assignment',aid);return {'ok':True,'id':aid}
 
 @app.put('/api/assignments/{aid}')
@@ -492,6 +514,10 @@ def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
         if bool(old['workflow'])!=x.workflow and c.execute('SELECT 1 FROM submissions WHERE assignment_id=?',(aid,)).fetchone():raise HTTPException(409,'已有提交的作业不能切换流程，请另建四轮作业')
         if x.expected_revision is not None and x.expected_revision!=old['revision']:raise HTTPException(409,'作业已被更新，请刷新后再编辑')
         if c.execute("SELECT 1 FROM submissions WHERE assignment_id=? AND status IN ('AI排队中','AI批改中') LIMIT 1",(aid,)).fetchone():raise HTTPException(409,'本作业正在AI批改，请完成或取消排队任务后再编辑')
+        if x.round_weights is not None:
+            new_weights=writing_scores.weights(x.round_weights)
+            if new_weights!=json.loads(old['round_weights']) and c.execute('SELECT 1 FROM submissions WHERE assignment_id=? AND published=1',(aid,)).fetchone():raise HTTPException(409,'已有总成绩发布，请先撤回发布后再调整权重')
+            c.execute('UPDATE assignments SET round_weights=? WHERE id=?',(json.dumps(new_weights),aid))
         rubric=assignment_values(x,c)
         c.execute('UPDATE assignments SET title=?,instructions=?,deadline=?,grading_instructions=?,rubric=?,revision=revision+1 WHERE id=?',(x.title.strip(),x.instructions.strip(),x.deadline,x.grading_instructions,json.dumps(rubric,ensure_ascii=False) if rubric is not None else old['rubric'],aid))
         c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
@@ -591,7 +617,7 @@ def submission_file(sid:int,u=Depends(current)):
 @app.get('/api/teacher/submissions')
 def all_submissions(u=Depends(teacher)):
     with db() as c:
-        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.workflow,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id WHERE a.deleted_at="" ORDER BY s.id DESC')]
+        rows=[dict(r) for r in c.execute('SELECT s.id,s.assignment_id,s.user_id,s.filename,s.created,s.status,s.ai_json,s.score,s.feedback,s.published,s.returned,s.return_reason,s.returned_at,s.appeal_reason,u.name,u.student_no,a.title,a.workflow,a.revision assignment_revision FROM submissions s JOIN users u ON u.id=s.user_id JOIN assignments a ON a.id=s.assignment_id WHERE a.deleted_at="" AND u.deleted_at="" ORDER BY s.id DESC')]
         for r in rows:r['ai']=json.loads(r.pop('ai_json')) if r['ai_json'] else None
     return rows
 class Grade(BaseModel):
@@ -606,7 +632,8 @@ def grade(sid:int,x:Grade,u=Depends(teacher)):
         writing_workflow.require_final(c,sid)
         if c.execute('SELECT status FROM submissions WHERE id=?',(sid,)).fetchone()[0] in BUSY:raise HTTPException(409,'请等待AI任务结束后再保存评分')
         if c.execute('SELECT returned FROM submissions WHERE id=?',(sid,)).fetchone()[0]:raise HTTPException(409,'已退回的作业须等待学生重交后评分')
-        c.execute('UPDATE submissions SET score=?,feedback=?,published=?,status=? WHERE id=?',(x.score,x.feedback,int(x.published),'已发布' if x.published else '教师复核中',sid))
+        computed_score=writing_scores.final_score(c,sid,x,u['id'],now())
+        c.execute('UPDATE submissions SET score=?,feedback=?,published=?,status=? WHERE id=?',(computed_score,x.feedback,int(x.published),'已发布' if x.published else '教师复核中',sid))
     audit(u['id'],'grade',sid)
     return {'ok':True}
 class ReturnWork(BaseModel):
@@ -647,8 +674,9 @@ def history_file(hid:int,u=Depends(teacher)):
 @app.get('/api/teacher/students')
 def students(u=Depends(teacher)):
     with db() as c:
-        result=[dict(r) for r in c.execute("SELECT id,name,student_no,created FROM users WHERE role='student' ORDER BY student_no")]
+        result=[dict(r) for r in c.execute("SELECT id,name,student_no,phone,created FROM users WHERE role='student' AND deleted_at='' ORDER BY student_no")]
         for r in result:
+            r['courses']=course_access.courses_for(c,r['id'])
             r['practice']=progress(r['id'],c)
             r['timed_practice']=adaptive_practice.overview(c,r['id'])
             r['submitted']=c.execute('SELECT COUNT(*) FROM submissions WHERE user_id=? AND assignment_id IN (SELECT id FROM assignments WHERE deleted_at="")',(r['id'],)).fetchone()[0]
@@ -658,7 +686,7 @@ class Reset(BaseModel):password:str=Field(min_length=10,max_length=128)
 @app.post('/api/teacher/students/{uid}/password')
 def reset(uid:int,x:Reset,u=Depends(teacher)):
     with db() as c:
-        if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student'",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
+        if not c.execute("SELECT 1 FROM users WHERE id=? AND role='student' AND deleted_at=''",(uid,)).fetchone():raise HTTPException(404,'学生不存在')
         c.execute('UPDATE users SET password=? WHERE id=?',(pwdhash(x.password),uid))
         c.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
     audit(u['id'],'reset-password',uid);return {'ok':True}
@@ -666,8 +694,8 @@ def reset(uid:int,x:Reset,u=Depends(teacher)):
 def export(u=Depends(teacher)):
     rows=students(u)
     f=io.StringIO();f.write('\ufeff');w=csv.writer(f)
-    w.writerow(['学号','姓名','练习完成题数','统一题库题数','练习平时成绩(未答计0)','已交作业数','已发布作业平均分','30题练习完成轮次','30题练习累计正确率','30题练习超时题数'])
-    for r in rows:w.writerow([("'"+r['student_no']),r['name'] if not r['name'].startswith(('=','+','-','@')) else "'"+r['name'],r['practice']['done'],r['practice']['total'],r['practice']['score'],r['submitted'],r['assignment_score'],r['timed_practice']['rounds'],r['timed_practice']['accuracy'],r['timed_practice']['timeouts']])
+    w.writerow(['学号','姓名','练习完成题数','统一题库题数','练习平时成绩(未答计0)','已交作业数','已发布作业平均分','30题练习完成轮次','30题练习累计正确率','30题练习超时题数','电话号码','已加入课程','AI科研PPT分享','分享日期'])
+    for r in rows:w.writerow([("'"+r['student_no']),r['name'] if not r['name'].startswith(('=','+','-','@')) else "'"+r['name'],r['practice']['done'],r['practice']['total'],r['practice']['score'],r['submitted'],r['assignment_score'],r['timed_practice']['rounds'],r['timed_practice']['accuracy'],r['timed_practice']['timeouts'],"'"+r['phone'],','.join(course_access.TITLES[x['course_id']] for x in r['courses']),next(('已分享' if x['ppt_presented'] else '未分享' for x in r['courses'] if x['course_id']=='writing'),'未加入'),next((x['ppt_date'] for x in r['courses'] if x['course_id']=='writing'),'')])
     return StreamingResponse(iter([f.getvalue()]),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=grades.csv'})
 
 def ai_settings():
@@ -882,6 +910,8 @@ def health():return {'ok':True}
 REVIEW_QUEUE=ReviewQueue(db,POOL,lambda sid:run_review(sid),ai_settings)
 writing_workflow.register(app,globals())
 adaptive_practice.register(app,globals())
+course_access.register(app,globals())
+writing_scores.register(app,globals())
 
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)

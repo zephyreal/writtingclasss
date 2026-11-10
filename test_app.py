@@ -13,8 +13,11 @@ def invitation_for_tests():
     with a.db() as db:db.execute('INSERT OR IGNORE INTO course_invites(code_hash,label,max_uses,expires,created) VALUES(?,?,?,?,?)',(a.hashlib.sha256(code.encode()).hexdigest(),'测试专用',10000,time.time()+86400,a.now()))
     return code
 def student(no):
-    c=client();assert c.post('/api/register',json={'name':'测试学生','student_no':no,'password':'test-password-123','invite_code':invitation_for_tests()}).status_code==200
-    assert c.post('/api/login',json={'student_no':no,'password':'test-password-123','invite_code':invitation_for_tests()}).status_code==200
+    c=client();assert c.post('/api/register',json={'name':'测试学生','student_no':no,'password':'test-password-123','phone':'13800138000','invite_code':invitation_for_tests()}).status_code==200
+    assert c.post('/api/login',json={'student_no':no,'password':'test-password-123','phone':'13800138000','invite_code':invitation_for_tests()}).status_code==200
+    uid=c.get('/api/me').json()['id']
+    with a.db() as db:
+        for cid in ('writing','english','equipment','design'):db.execute('INSERT OR IGNORE INTO course_memberships(user_id,course_id,joined,origin) VALUES(?,?,?,?)',(uid,cid,a.now(),'多课程测试夹具'))
     return c
 def teacher():
     with a.db() as db:
@@ -37,8 +40,8 @@ def test_auth_csrf_roles():
 
 def test_registration_validation_and_duplicate():
     s=student('reg100')
-    assert s.post('/api/register',json={'name':'学生','student_no':'reg100','password':'test-password-123','invite_code':invitation_for_tests()}).status_code==409
-    assert s.post('/api/register',json={'name':'学生','student_no':'bad;id','password':'test-password-123'}).status_code==400
+    assert s.post('/api/register',json={'name':'学生','student_no':'reg100','password':'test-password-123','phone':'13800138000','invite_code':invitation_for_tests()}).status_code==409
+    assert s.post('/api/register',json={'name':'学生','student_no':'bad;id','password':'test-password-123','phone':'13800138000'}).status_code==400
     assert s.post('/api/register',json={'name':'学生','student_no':'reg200','password':'short'}).status_code==422
 
 def test_student_delete_unreviewed_submission_and_resubmit(monkeypatch):
@@ -258,7 +261,7 @@ with app.db() as c:
     (code/'app.py').write_text(Path(a.__file__).read_text())
     (code/'review_pipeline.py').write_text((Path(a.__file__).parent/'review_pipeline.py').read_text())
     import shutil
-    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py','adaptive_practice.py','practice_bank.py','seed.py'):
+    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py','adaptive_practice.py','practice_bank.py','seed.py','course_access.py','writing_scores.py'):
         shutil.copy2(Path(a.__file__).parent/module,code/module)
     shutil.copytree(Path(a.__file__).parent/'vendor',code/'vendor',dirs_exist_ok=True)
     shutil.copytree(Path(a.__file__).parent/'question_bank',code/'question_bank',dirs_exist_ok=True)

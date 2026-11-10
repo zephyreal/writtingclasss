@@ -12,7 +12,7 @@ vm.runInContext('user={name:"教师",role:"teacher"};api=async()=>[assignment]',
  vm.runInContext('openAssignmentEditor(assignment)',ctx);
  assert(node('#modalBody').innerHTML.includes('研究问题 | 60')&&node('#modalBody').innerHTML.includes('name="grading_instructions"'));
  vm.runInContext('api=async(path,method,data)=>{lastRequest={path,method,data};return {ok:true}};show=async id=>{lastPage=id}',ctx);
- formValues={title:'修改后的作业',instructions:'补充问题',deadline:'',grading_instructions:'只评价引言',rubric_lines:'研究问题 | 70\n表达 | 30'};
+ formValues={round_weight_0:'25',round_weight_1:'25',round_weight_2:'25',round_weight_3:'25',title:'修改后的作业',instructions:'补充问题',deadline:'',grading_instructions:'只评价引言',rubric_lines:'研究问题 | 70\n表达 | 30'};
  await node('#assignmentEditor').onsubmit({target:{},preventDefault(){}});
  const req=vm.runInContext('lastRequest',ctx);
  assert(req.path==='/assignments/7'&&req.method==='PUT'&&req.data.expected_revision===3&&req.data.rubric[0].max===70);

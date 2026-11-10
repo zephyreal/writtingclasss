@@ -17,7 +17,7 @@ def setup(tmp_path,monkeypatch):
     monkeypatch.setattr(a,'DB',tmp_path/'course.db');a.init()
     monkeypatch.setattr(a,'ai_settings',lambda:{'key':'','model':'test','auto_review':False})
     t=teacher();s=student('workflow01');other=student('workflow02')
-    response=t.post('/api/assignments',json={'title':'科研写作','workflow':True,'rubric':[{'name':'论证','max':70},{'name':'修改','max':30}]})
+    response=t.post('/api/assignments',json={'title':'科研写作','workflow':True,'round_weights':[0,0,0,100],'rubric':[{'name':'论证','max':70},{'name':'修改','max':30}]})
     assert response.status_code==200,response.text
     aid=response.json()['id']
     @contextmanager
@@ -122,10 +122,11 @@ def test_briefing_consent_review_and_editable_export(setup):
     assert t.get(base+'/pptx').status_code==409
     assert t.put(base,json=draft).status_code==409
 
-def test_uncertain_tracking_and_no_early_score(setup):
+def test_uncertain_tracking_and_early_score_warning(setup):
     t,s,other,aid,calls=setup
     result=w.normalize({'summary':'有待核验','dimensions':[{'name':'论证','score':70}], 'tracking':[{'issue_id':'r1-i1','status':'improved','quote':'不存在','reason':'改好了'}]},TEXT,[{'name':'论证','max':100}],2,[{'issues':[{'id':'r1-i1'},{'id':'r1-i2'}]}])
-    assert result['score'] is None and result['dimensions']==[]
+    assert result['score']==70 and result['score_warning']
+    assert result['dimensions'][0]['quote_verified'] is False
     assert len(result['tracking'])==2 and all(t['status']=='uncertain' for t in result['tracking'])
 
 def test_responses_surveys_and_manual_fallback(setup):
@@ -200,7 +201,7 @@ def test_delete_published_legacy_grade_excluded_and_restored(setup):
 def test_invitation_required_capacity_and_revocation(setup):
     t,s,other,aid,calls=setup
     from test_app import client
-    anon=client();body={'name':'新学生','student_no':'invite-new01','password':'test-password-123'}
+    anon=client();body={'phone':'13800138000','name':'新学生','student_no':'invite-new01','password':'test-password-123'}
     assert anon.post('/api/register',json=body).status_code==403
     assert s.post('/api/teacher/invites',json={}).status_code==403
     invitation=t.post('/api/teacher/invites',json={'label':'一人邀请码','max_uses':1,'valid_days':1}).json()
