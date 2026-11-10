@@ -6,7 +6,7 @@ import time
 from collections import Counter,defaultdict
 from fastapi import BackgroundTasks,Depends,HTTPException
 from pydantic import BaseModel,Field,StrictInt
-from practice_bank import BANK,BANK_VERSION,TOPICS
+from practice_bank import BANK,BANK_VERSION,TOPICS,VERSION_PREFIX,CATALOG_VERSION,CATALOG_LABEL
 
 clock=time.time
 RNG=secrets.SystemRandom()
@@ -21,10 +21,15 @@ def migrate(c):
     CREATE INDEX IF NOT EXISTS practice_runs_user ON practice_runs(user_id,id);
     CREATE TABLE IF NOT EXISTS practice_generation(user_id INTEGER PRIMARY KEY REFERENCES users(id),generation INTEGER NOT NULL DEFAULT 0);
     ''')
+    # Unfinished legacy sessions are not learning records and must not cross curricula.
+    for row in c.execute('SELECT token,items FROM practice_pending').fetchall():
+        items=json.loads(row['items'])
+        if not items or items[0].get('curriculum')!=CATALOG_VERSION:
+            c.execute('DELETE FROM practice_pending WHERE token=?',(row['token'],))
 
 def evidence(c,uid):
     # Bound memory and model context; all reports still retain complete snapshots.
-    rows=c.execute('SELECT items FROM practice_runs WHERE user_id=? ORDER BY id DESC LIMIT 8',(uid,)).fetchall()
+    rows=c.execute('SELECT items FROM practice_runs WHERE user_id=? AND bank_version LIKE ? ORDER BY id DESC LIMIT 8',(uid,VERSION_PREFIX+'%')).fetchall()
     stats=defaultdict(lambda:{'n':0,'correct':0,'timeouts':0,'wrong':0})
     seen=Counter();last=set()
     for i,row in enumerate(rows):
@@ -36,7 +41,7 @@ def evidence(c,uid):
 
 def choose(c,uid):
     stats,seen,last=evidence(c,uid)
-    latest=c.execute('SELECT plan FROM practice_runs WHERE user_id=? ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
+    latest=c.execute('SELECT plan FROM practice_runs WHERE user_id=? AND bank_version LIKE ? ORDER BY id DESC LIMIT 1',(uid,VERSION_PREFIX+'%')).fetchone()
     if not latest:
         units=list(range(1,9));RNG.shuffle(units);picked=[]
         # 4x6 + 3x2 = 30, with the smaller groups rotating randomly.
@@ -81,7 +86,8 @@ def choose(c,uid):
     return snapshots,source
 
 def summary(row):
-    return {'id':row['id'],'completed':row['completed'],'started':row['started'],'correct':row['correct'],'total':SIZE,'timeouts':row['timeouts'],'score':round(row['correct']/SIZE*100,1),'source':row['source']}
+    current_curriculum=row['bank_version'].startswith(VERSION_PREFIX)
+    return {'curriculum_label':CATALOG_LABEL if current_curriculum else '旧目录历史记录','current_curriculum':current_curriculum,'id':row['id'],'completed':row['completed'],'started':row['started'],'correct':row['correct'],'total':SIZE,'timeouts':row['timeouts'],'score':round(row['correct']/SIZE*100,1),'source':row['source']}
 
 def result(row):
     r=summary(row);items=json.loads(row['items']);misses=Counter(q['topic_name'] for q in items if not q['correct'] and not q['timed_out'])
@@ -90,12 +96,13 @@ def result(row):
 
 def public_pending(row):
     q=json.loads(row['items'])[row['position']]
-    return {'token':row['token'],'position':row['position'],'total':SIZE,'seconds':SECONDS,'deadline':row['deadline'],'server_now':clock(),'question':{k:q[k] for k in ('id','chapter_id','stem','options','kind')},'source':row['source']}
+    return {'token':row['token'],'position':row['position'],'total':SIZE,'seconds':SECONDS,'deadline':row['deadline'],'server_now':clock(),'question':{k:q[k] for k in ('id','chapter_id','chapter_title','stem','options','kind')},'source':row['source']}
 
 def overview(c,uid):
     row=c.execute('SELECT COUNT(*) n,SUM(correct) correct,SUM(timeouts) timeouts FROM practice_runs WHERE user_id=?',(uid,)).fetchone()
     latest=c.execute('SELECT * FROM practice_runs WHERE user_id=? ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
-    return {'rounds':row['n'],'answered':row['n']*SIZE,'correct':row['correct'] or 0,'timeouts':row['timeouts'] or 0,'accuracy':round((row['correct'] or 0)/(row['n']*SIZE)*100,1) if row['n'] else None,'latest':summary(latest) if latest else None}
+    current_rounds=c.execute('SELECT COUNT(*) FROM practice_runs WHERE user_id=? AND bank_version LIKE ?',(uid,VERSION_PREFIX+'%')).fetchone()[0]
+    return {'current_rounds':current_rounds,'rounds':row['n'],'answered':row['n']*SIZE,'correct':row['correct'] or 0,'timeouts':row['timeouts'] or 0,'accuracy':round((row['correct'] or 0)/(row['n']*SIZE)*100,1) if row['n'] else None,'latest':summary(latest) if latest else None}
 
 def unit_profile(c,uid):
     stats,_,_=evidence(c,uid)
@@ -121,7 +128,7 @@ def register(app,env):
             cfg=env['ai_settings']()
             if not cfg.get('key') or not cfg.get('model'):return
             with db() as c:
-                if not c.execute('SELECT 1 FROM practice_runs WHERE id=? AND user_id=?',(rid,uid)).fetchone():return
+                if not c.execute('SELECT 1 FROM practice_runs WHERE id=? AND user_id=? AND bank_version LIKE ?',(rid,uid,VERSION_PREFIX+'%')).fetchone():return
                 stats,_,_=evidence(c,uid)
             # No student names, text, paper files, or answer generation are sent.
             signals=[{**TOPICS[t],**s} for t,s in stats.items() if t in TOPICS]

@@ -1,4 +1,18 @@
+import json
+
+CATALOG_VERSION='ppt-20261110'
+CATALOG_LABEL='PPT配套八单元'
 CHAPTERS=[
+(1,'文献的基本概念','第 1 单元 · 2 学时','理解文献、学术信息、书目标识、版本与来源核验。'),
+(2,'文献与论文分类','第 2 单元 · 2 学时','区分文献载体、加工层次、论文类型与研究方法。'),
+(3,'论文构架与检索方法','第 3 单元 · 2 学时','组织章节和论证链，掌握检索、筛选与研究空白定位。'),
+(4,'论文写作技巧','第 4 单元 · 2 学时','练习问题定位、摘要结果、方法报告、学术表达与准确引用。'),
+(5,'论文作图技巧','第 5 单元 · 2 学时','合理选择图表，核对标注、误差、图像真实性与图文对应。'),
+(6,'论文投稿与注意事项','第 6 单元 · 2 学时','了解选刊、投稿材料、作者责任、评审回应与校样核对。'),
+(7,'学位论文答辩','第 7 单元 · 2 学时','围绕研究主线准备汇报，说明贡献、证据、局限并回应质询。'),
+(8,'高水平论文写作经验分享','第 8 单元 · 2 学时','综合运用量规、修改取舍、过程反思与可复现研究习惯。')]
+
+LEGACY_CHAPTERS=[
 (1,'从研究问题出发','第 1 单元 · 2 学时','区分研究主题、研究问题与可检验的研究目标。'),
 (2,'文献检索与研究空白','第 2 单元 · 2 学时','组织文献证据，建立有依据的研究空白。'),
 (3,'论文结构与论证链','第 3 单元 · 2 学时','连接问题、方法、结果与结论，形成完整论证。'),
@@ -7,7 +21,16 @@ CHAPTERS=[
 (6,'结果呈现与讨论','第 6 单元 · 2 学时','区分观察结果与机制解释，理解证据的边界。'),
 (7,'学术表达与引用','第 7 单元 · 2 学时','改善表达精度，规范改写、引用与AI使用说明。'),
 (8,'修改、评审与整合','第 8 单元 · 2 学时','依据评分量表修改论文，逐条回应评审意见。')]
-# 所有学生使用同一24题池，难度仅影响推荐顺序。每题第一次作答计分。
+
+def sync_chapters(c,stamp):
+    # Apply to installed databases as well as fresh installs; keep all foreign-key IDs.
+    c.execute('CREATE TABLE IF NOT EXISTS course_catalog_migrations(version TEXT PRIMARY KEY,previous_chapters TEXT NOT NULL,applied TEXT NOT NULL)')
+    if c.execute('SELECT 1 FROM course_catalog_migrations WHERE version=?',(CATALOG_VERSION,)).fetchone():return
+    previous=[dict(row) for row in c.execute('SELECT id,title,description,objective FROM chapters ORDER BY id')]
+    c.executemany('UPDATE chapters SET title=?,description=?,objective=? WHERE id=?',[(title,description,objective,uid) for uid,title,description,objective in CHAPTERS])
+    c.execute('INSERT INTO course_catalog_migrations VALUES(?,?,?)',(CATALOG_VERSION,json.dumps(previous,ensure_ascii=False),stamp))
+
+# 旧版24题仅为历史成绩与旧接口兼容保留；新版训练使用practice_bank。
 QUESTIONS=[
 (1,1,'以下哪一项最接近明确的研究问题？',['智能制造很重要','研究激光焊接技术','在固定功率条件下，焊接速度如何影响316L焊缝熔深？','深度学习发展迅速'],2,'研究问题应明确研究对象、变量及其关系，且能够通过数据检验。'),
 (1,2,'“提高预测精度”作为研究目标，最需要补充什么？',['更多形容词','评价指标、比较基线与测试条件','作者的研究兴趣','更长的背景介绍'],1,'目标要可检验：明确在何种测试条件下，用哪些指标与基线比较。'),

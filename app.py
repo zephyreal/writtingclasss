@@ -96,6 +96,8 @@ def init():
             c.executemany('INSERT INTO questions(chapter_id,level,stem,options,answer,explanation) VALUES(?,?,?,?,?,?)',[(ch,lv,s,json.dumps(op,ensure_ascii=False),a,e) for ch,lv,s,op,a,e in QUESTIONS])
             rubric=json.dumps([{'name':'研究问题与目标','max':20},{'name':'结构与逻辑','max':25},{'name':'证据与论证','max':25},{'name':'学术表达','max':20},{'name':'引用规范','max':10}],ensure_ascii=False)
             c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created) VALUES(?,?,?,?,?)',('论文写作综合作业','请选择与你研究方向相关的主题，提交论文草稿或完整的引言与方法部分。明确研究问题、研究空白、方法和证据；参考文献须真实、可核查。支持 DOCX、文字型 PDF，不超过5 MB。',rubric,'',now()))
+        from seed import sync_chapters
+        sync_chapters(c,now())
         c.execute("UPDATE submissions SET status='AI任务中断，可重新批改' WHERE status IN ('AI批改中','AI排队中')")
 init()
 
@@ -320,12 +322,14 @@ def delete_material(mid:int,u=Depends(teacher)):
     return {'ok':True}
 
 def progress(uid,c):
+    from seed import LEGACY_CHAPTERS
+    legacy_titles={row[0]:row[1] for row in LEGACY_CHAPTERS}
     rows=c.execute('SELECT q.chapter_id,q.id,a.score FROM questions q LEFT JOIN attempts a ON a.id=(SELECT MIN(id) FROM attempts WHERE user_id=? AND question_id=q.id)',(uid,)).fetchall()
     result=[]
     for ch in c.execute('SELECT id,title FROM chapters'):
         items=[r for r in rows if r['chapter_id']==ch['id']]
         done=[r for r in items if r['score'] is not None]
-        result.append({'id':ch['id'],'title':ch['title'],'total':len(items),'done':len(done),'score':round(sum(r['score'] for r in done)/len(items),1) if items else 0})
+        result.append({'id':ch['id'],'title':legacy_titles.get(ch['id'],ch['title']),'total':len(items),'done':len(done),'score':round(sum(r['score'] for r in done)/len(items),1) if items else 0})
     return {'chapters':result,'done':sum(r['score'] is not None for r in rows),'total':len(rows),'score':round(sum(r['score'] or 0 for r in rows)/len(rows),1) if rows else 0}
 @app.get('/api/progress')
 def get_progress(u=Depends(current)):
