@@ -14,6 +14,7 @@ from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview, D
 import writing_workflow
 import adaptive_practice
 import course_access
+import writing_studio
 import writing_scores
 
 ROOT=Path(__file__).parent
@@ -85,6 +86,7 @@ def init():
         course_access.migrate(c,now())
         writing_workflow.migrate(c)
         writing_scores.migrate(c)
+        writing_studio.migrate(c)
         adaptive_practice.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
@@ -459,7 +461,7 @@ def assignments(u=Depends(current)):
         result=[dict(r) for r in c.execute("SELECT * FROM assignments WHERE deleted_at='' ORDER BY id DESC")]
         for a in result:
             a['rubric']=json.loads(a['rubric'])
-            a['round_weights']=json.loads(a['round_weights'])
+            a['round_weights']=json.loads(a['round_weights']);a['stage_rubrics']=json.loads(a['stage_rubrics'])
             s=c.execute('SELECT id,filename,created,status,score,feedback,published,returned,return_reason,returned_at,appeal_reason,ai_json FROM submissions WHERE assignment_id=? AND user_id=?',(a['id'],u['id'])).fetchone()
             a['submission']=dict(s) if s else None
             if s and a['workflow']:
@@ -484,6 +486,7 @@ class Assignment(BaseModel):
     expected_revision:int|None=None
     workflow:bool=False
     round_weights:list[float]|None=Field(default=None,min_length=4,max_length=4)
+    stage_rubrics:list[list[Criterion]]|None=Field(default=None,max_length=4)
 
 def assignment_values(x,c):
     if x.workflow and not x.instructions.strip():x.instructions='围绕“'+x.title.strip()+'”完成四轮递进写作。以本人真实材料或获准案例为依据，按每轮任务要求完善同一作品，不编造数据和文献。'
@@ -492,6 +495,7 @@ def assignment_values(x,c):
         try:
             if datetime.fromisoformat(x.deadline).tzinfo is not None:raise ValueError()
         except ValueError:raise HTTPException(400,'截止时间请使用北京时间，不带时区后缀')
+    if x.stage_rubrics is not None:writing_studio.validate_rubrics([[r.model_dump() for r in rr] for rr in x.stage_rubrics])
     rubric=[r.model_dump() for r in x.rubric] if x.rubric is not None else None
     if rubric is not None:
         names=[r['name'].strip() for r in rubric]
@@ -506,6 +510,8 @@ def create_assignment(x:Assignment,u=Depends(teacher)):
         if rubric is None:rubric=json.loads(c.execute('SELECT rubric FROM assignments ORDER BY id LIMIT 1').fetchone()[0])
         aid=c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created,grading_instructions) VALUES(?,?,?,?,?,?)',(x.title.strip(),x.instructions.strip(),json.dumps(rubric,ensure_ascii=False),x.deadline,now(),x.grading_instructions)).lastrowid
         c.execute('UPDATE assignments SET workflow=?,round_weights=? WHERE id=?',(int(x.workflow),json.dumps(writing_scores.weights(x.round_weights if x.round_weights is not None else writing_scores.DEFAULT_WEIGHTS)),aid))
+        stages=writing_studio.validate_rubrics([[r.model_dump() for r in rr] for rr in x.stage_rubrics]) if x.stage_rubrics is not None else (writing_studio.DEFAULT_RUBRICS if x.workflow and x.rubric is None else [])
+        c.execute('UPDATE assignments SET stage_rubrics=? WHERE id=?',(json.dumps(stages,ensure_ascii=False),aid))
     audit(u['id'],'create-assignment',aid);return {'ok':True,'id':aid}
 
 @app.put('/api/assignments/{aid}')
@@ -524,6 +530,7 @@ def edit_assignment(aid:int,x:Assignment,u=Depends(teacher)):
         rubric=assignment_values(x,c)
         c.execute('UPDATE assignments SET title=?,instructions=?,deadline=?,grading_instructions=?,rubric=?,revision=revision+1 WHERE id=?',(x.title.strip(),x.instructions.strip(),x.deadline,x.grading_instructions,json.dumps(rubric,ensure_ascii=False) if rubric is not None else old['rubric'],aid))
         c.execute('UPDATE assignments SET workflow=? WHERE id=?',(int(x.workflow),aid))
+        if x.stage_rubrics is not None:c.execute('UPDATE assignments SET stage_rubrics=? WHERE id=?',(json.dumps(writing_studio.validate_rubrics([[r.model_dump() for r in rr] for rr in x.stage_rubrics]),ensure_ascii=False),aid))
     audit(u['id'],'edit-assignment',aid);return {'ok':True,'revision':old['revision']+1}
 
 @app.delete('/api/assignments/{aid}')
@@ -915,6 +922,7 @@ writing_workflow.register(app,globals())
 adaptive_practice.register(app,globals())
 course_access.register(app,globals())
 writing_scores.register(app,globals())
+writing_studio.register(app,globals())
 
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)

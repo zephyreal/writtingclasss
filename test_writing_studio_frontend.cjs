@@ -1,0 +1,33 @@
+const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert');
+const nodes=new Map(),groups=new Map(),clicks=[];
+function node(s){if(!nodes.has(s))nodes.set(s,{innerHTML:'',textContent:'',value:'',hidden:false,disabled:false,style:{},listeners:{},addEventListener(k,f){this.listeners[k]=f},showModal(){},close(){},scrollIntoView(){}});return nodes.get(s)}
+const ctx=vm.createContext({window:{addEventListener(){}},document:{querySelector:node,querySelectorAll:s=>groups.get(s)||[],addEventListener(k,f){if(k==='click')clicks.push(f)}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),FormData:class{},setTimeout,clearTimeout,console,confirm:()=>false});
+for(const f of ['app.js','english.js','teacher-writing.js','writing-workflow.js','adaptive-practice.js','course-admin.js','writing-studio.js'])vm.runInContext(fs.readFileSync(__dirname+'/static/'+f,'utf8'),ctx);
+ctx.source={round_id:1,submission_id:8,round_no:1,filename:'学生稿.docx',warnings:['<script>warning</script>'],text_only:true,pages:[{page_no:1,text:'😀原文 <script>bad</script>'}],anchors:[{issue_id:'q',page_no:1,start:1,end:3}],review:{summary:'修改建议',issues:[{id:'q',problem:'问题 <x>',quote:'原文',suggestion:'建议',category:'论证结构',criterion:'研究问题',needs_review:false}]}};
+vm.runInContext("user={id:3,role:'teacher'};api=async()=>source",ctx);
+(async()=>{
+ const locate={dataset:{coachIssue:'q'}};groups.set('[data-coach-issue]',[locate]);
+ await vm.runInContext('openDocumentCoach(1)',ctx);
+ assert(node('#modalBody').innerHTML.includes('未能可靠定位')===false);
+ assert(node('#modalBody').innerHTML.includes('&lt;script&gt;warning')&&!node('#modalBody').innerHTML.includes('<script>'));
+ locate.onclick();assert(node('#coach-pages').innerHTML.includes('<mark>原文</mark>')&&node('#coach-pages').innerHTML.includes('😀'));
+ assert(!node('#coach-pages').innerHTML.includes('<script>'));
+ let resolve;ctx.pending=new Promise(r=>resolve=r);vm.runInContext('api=async()=>pending',ctx);
+ const wait=vm.runInContext('openDocumentCoach(1)',ctx);vm.runInContext("user={id:4,role:'student'}",ctx);resolve(ctx.source);await wait;
+ assert(!node('#modalBody').innerHTML.includes('document-coach'),'迟到的响应不可显示给切换后的账号');
+ ctx.assignment={id:2,title:'科研写作',workflow:true,round_weights:[10,20,30,40],rubric:[],stage_rubrics:[]};
+ ctx.cohort={assignment:ctx.assignment,students:[{id:3,name:'同学 <script>',student_no:'2026001',ppt_presented:0,ppt_date:'',ppt_topic:'',submission_id:8,published:false,needs_review:1,unconfirmed:1,status:'已检查',grading:{total:null},rounds:[{id:1,round_no:1,checked:true,teacher_score:null,grade_published:false,needs_review:1}]}]};
+ vm.runInContext("user={id:1,role:'teacher'};api=async p=>p==='/assignments'?[assignment]:cohort",ctx);
+ let page=await vm.runInContext('views.writingWorklist()',ctx);
+ assert(page.html.includes('第1轮 10%')&&page.html.includes('未提交')&&page.html.includes('未分享'));
+ assert(page.html.includes('页面筛选不改变操作范围')&&page.html.includes('&lt;script&gt;')&&!page.html.includes('<script>'));
+ ctx.preview={token:'preview-token',items:[{name:'学生',student_no:'2026001',round_no:1,score:80}],skipped:[{name:'其他学生',round_no:2,reason:'待核验'}]};ctx.calls=[];
+ vm.runInContext("api=async(p,m,d)=>{calls.push({p,m,d});return p.endsWith('batch-preview')?preview:{affected:1}};show=async()=>{}",ctx);
+ await vm.runInContext("openStudioBatch(2,'draft',[3])",ctx);
+ assert(ctx.calls.length===1&&ctx.calls[0].p.endsWith('batch-preview'));
+ assert(node('#modalBody').innerHTML.includes('不发布')&&node('#modalBody').innerHTML.includes('待核验'));
+ await node('#studio-batch-confirm').onclick({currentTarget:node('#studio-batch-confirm'),preventDefault(){}});
+ assert(ctx.calls.length===2&&ctx.calls[1].p.endsWith('batch-apply')&&ctx.calls[1].d.token==='preview-token');
+ assert(JSON.stringify(ctx.calls[1].d.student_ids)==='[3]');
+ console.log('Writing studio: original grounding/escaping/Unicode, late-response privacy, worklist and explicit scoped batch confirmation passed');
+})().catch(e=>{console.error(e);process.exitCode=1});

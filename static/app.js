@@ -18,7 +18,7 @@ const COURSES=[
  {id:'design',title:'智能制造课程设计',subtitle:'Intelligent Manufacturing Design',icon:'◉',label:'实践案例已开放',description:'通过AI五子棋交互案例，探索智能决策与工程实践。',state:'open'}
 ];
 function renderNavigation(){
- const writingItems=user.role==='teacher'?[...menu,['students','♙','学生管理'],['review','✓','作业批改'],['access','♧','注册与额度'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
+ const writingItems=user.role==='teacher'?[...menu,['writingWorklist','▦','班级交付清单'],['students','♙','学生管理'],['review','✓','作业批改'],['access','♧','注册与额度'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
  const course=COURSES.find(c=>c.id===activeCourse);
  const englishItems=[['english','◉','话题对话'],['englishHistory','▤','记录与成绩'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishReview','✓','口语评价与成绩'],['englishStudents','♙','英语练习档案'],['englishSettings','⚙','实时语音设置']]:[])];
  const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];

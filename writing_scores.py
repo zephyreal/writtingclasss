@@ -38,14 +38,15 @@ class RoundGrade(BaseModel):
     published:bool=False
 
 def final_score(c,sid,x,uid,stamp):
-    a=c.execute('SELECT a.workflow,a.round_weights FROM assignments a JOIN submissions s ON s.assignment_id=a.id WHERE s.id=?',(sid,)).fetchone()
+    a=c.execute('SELECT a.* FROM assignments a JOIN submissions s ON s.assignment_id=a.id WHERE s.id=?',(sid,)).fetchone()
     if not a or not a['workflow']:return x.score
     from writing_workflow import require_final
+    from writing_studio import policy_hash
     require_final(c,sid)
     ww=weights(json.loads(a['round_weights']))
     # Old assignments retain their original final-only grading semantics.
     if ww==[0,0,0,100]:
-        c.execute('UPDATE writing_rounds SET teacher_score=?,teacher_feedback=?,grade_published=?,graded_at=?,graded_by=? WHERE submission_id=? AND round_no=4',(x.score,x.feedback,int(x.published),stamp,uid,sid))
+        c.execute('UPDATE writing_rounds SET teacher_score=?,teacher_feedback=?,grade_published=?,graded_at=?,graded_by=?,graded_revision=?,graded_policy=? WHERE submission_id=? AND round_no=4',(x.score,x.feedback,int(x.published),stamp,uid,a['revision'],policy_hash(dict(a),4),sid))
     total=aggregate(c,sid)
     if total['total'] is None:raise HTTPException(409,'请先填写所有有权重轮次的教师分数，并完成四次提交')
     if ww!=[0,0,0,100] and abs(x.score-total['total'])>.011:raise HTTPException(409,'总分须按四轮教师分数和权重计算，请刷新后保存')
@@ -57,12 +58,14 @@ def register(app,env):
     def grade(rid:int,x:RoundGrade,u=Depends(teacher)):
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            r=c.execute("SELECT w.*,s.published AS final_published,s.status FROM writing_rounds w JOIN submissions s ON s.id=w.submission_id JOIN assignments a ON a.id=w.assignment_id JOIN users u ON u.id=w.user_id WHERE w.id=? AND a.deleted_at='' AND u.deleted_at=''",(rid,)).fetchone()
+            r=c.execute("SELECT w.*,s.published AS final_published,s.status,a.revision AS assignment_revision FROM writing_rounds w JOIN submissions s ON s.id=w.submission_id JOIN assignments a ON a.id=w.assignment_id JOIN users u ON u.id=w.user_id WHERE w.id=? AND a.deleted_at='' AND u.deleted_at=''",(rid,)).fetchone()
             if not r:raise HTTPException(404,'轮次不存在')
             if r['final_published']:raise HTTPException(409,'总成绩已发布，请先撤回总成绩后修改分轮评分')
             if r['status'] in env['BUSY']:raise HTTPException(409,'AI任务处理中，请等待完成后评分')
             if not r['review_json']:raise HTTPException(409,'请先完成本轮AI检查或保存人工反馈')
-            c.execute('UPDATE writing_rounds SET teacher_score=?,teacher_feedback=?,grade_published=?,graded_at=?,graded_by=? WHERE id=?',(x.score,x.feedback,int(x.published),env['now'](),u['id'],rid))
+            from writing_studio import policy_hash
+            assignment=dict(c.execute('SELECT * FROM assignments WHERE id=?',(r['assignment_id'],)).fetchone())
+            c.execute('UPDATE writing_rounds SET teacher_score=?,teacher_feedback=?,grade_published=?,graded_at=?,graded_by=?,graded_revision=?,graded_policy=? WHERE id=?',(x.score,x.feedback,int(x.published),env['now'](),u['id'],r['assignment_revision'],policy_hash(assignment,r['round_no']),rid))
             c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'writing-round-grade',json.dumps({'round':rid,'score':x.score,'published':x.published}),env['now']()))
             total=aggregate(c,r['submission_id'])
             # Draft totals are never silently published.

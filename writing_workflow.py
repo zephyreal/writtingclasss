@@ -9,6 +9,7 @@ from fastapi import Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import writing_scores
+import writing_studio
 
 STAGES = [
     {'title':'问题与路线','goal':'明确研究问题，说明已有证据，制定可完成的写作路线。','items':['暂定题目、研究对象、具体研究问题与意义','已有数据或材料及其来源；尚缺什么证据','核心文献矩阵：研究方法、主要发现、局限及与你的关系','初步提纲与各部分准备论证的内容']},
@@ -138,6 +139,10 @@ def run_review(sid):
                 '_usage_context':{'user_id':row['user_id'],'submission_id':sid,'purpose':f"四轮写作·第{row['round_no']}轮"}})
             if not document['complete']:raise ValueError('文档未完整读取，需教师处理，不推进下一轮')
             result=normalize(response,document['text'],snapshot['rubric'],row['round_no'],prior)
+            try:writing_studio.cache_source(row['id'],row['path'],document)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('Document preview unavailable round=%s',row['id'])
         result.update(reviewed_at=now(),scoring_basis={'revision':snapshot['revision'],'title':snapshot['title'],'instructions':snapshot['instructions'],'grading_instructions':snapshot['grading_instructions'],'rubric':snapshot['rubric']})
         encoded=json.dumps(result,ensure_ascii=False)
         with db() as c:
@@ -185,9 +190,11 @@ def student_round(row,published=False,c=None):
             review['score']=None;review['dimensions']=[];review.pop('score_warning',None)
             review.pop('partial_score',None);review.pop('partial_max',None)
         if review.get('practice') and not r['answer']:review['practice'].pop('analysis',None)
+    snapshot=json.loads(row['assignment_snapshot'])
+    r['rubric']=snapshot['rubric'];r['rubric_revision']=snapshot['revision']
     r['review']=review
     visible=published or bool(row['grade_published'])
-    r.update(teacher_score=row['teacher_score'] if visible else None,teacher_feedback=row['teacher_feedback'] if visible else '',grade_published=bool(row['grade_published']))
+    r.update(graded_at=row['graded_at'] if visible else '',teacher_score=row['teacher_score'] if visible else None,teacher_feedback=row['teacher_feedback'] if visible else '',grade_published=bool(row['grade_published']))
     return r
 
 def build_brief(c,aid,number):
@@ -263,7 +270,7 @@ def register(app,env):
             for item in c.execute('SELECT round_no,body FROM writing_briefings WHERE assignment_id=? ORDER BY round_no',(aid,)):
                 b=json.loads(item['body'])
                 if b.get('published'):briefings.append({'round_no':item['round_no'],'title':b['title'],'summary':b['summary'],'slides':[{'title':s['title'],'body':s['body']} for s in b['slides']]})
-        a['rubric']=json.loads(a['rubric']);a['round_weights']=json.loads(a['round_weights'])
+        a['rubric']=json.loads(a['rubric']);a['round_weights']=json.loads(a['round_weights']);a['stage_rubrics']=json.loads(a['stage_rubrics'])
         with db() as c:grading=writing_scores.aggregate(c,s['id'],public=True) if s else {'weights':a['round_weights'],'total':None,'missing':[1,2,3,4],'completed_rounds':0}
         return {'assignment':a,'grading':grading,'stages':STAGES,'rounds':rounds,'status':s['status'] if s else '',
                 'submission_id':s['id'] if s else None,'score':s['score'] if s and s['published'] else None,
@@ -337,10 +344,10 @@ def register(app,env):
                 else:
                     sid=c.execute("SELECT MAX(value)+1 FROM (SELECT COALESCE(MAX(id),0) value FROM submissions UNION ALL SELECT COALESCE(MAX(CAST(target AS INTEGER)),0) value FROM audit WHERE action='student-delete-submission')").fetchone()[0]
                     c.execute('INSERT INTO submissions(id,assignment_id,user_id,path,filename,created) VALUES(?,?,?,?,?,?)',(sid,aid,u['id'],path,name,env['now']()))
-                snap={k:a[k] for k in ('title','instructions','grading_instructions','revision')};snap['rubric']=json.loads(a['rubric'])
+                snap={k:a[k] for k in ('title','instructions','grading_instructions','revision')};snap['rubric']=writing_studio.rubric_for(a,round_no);snap['stage_rubrics']=json.loads(a['stage_rubrics']);snap['round_no']=round_no
                 if replace:
                     oldpath=rows[-1]['path']
-                    c.execute('UPDATE writing_rounds SET path=?,filename=?,created=?,shared=?,assignment_snapshot=? WHERE id=?',(path,name,env['now'](),int(shared),json.dumps(snap,ensure_ascii=False),rows[-1]['id']))
+                    c.execute('UPDATE writing_rounds SET path=?,filename=?,created=?,shared=?,assignment_snapshot=?,source_json=NULL WHERE id=?',(path,name,env['now'](),int(shared),json.dumps(snap,ensure_ascii=False),rows[-1]['id']))
                 else:
                     oldpath=None
                     c.execute('INSERT INTO writing_rounds(assignment_id,user_id,submission_id,round_no,path,filename,created,shared,assignment_snapshot) VALUES(?,?,?,?,?,?,?,?,?)',(aid,u['id'],sid,round_no,path,name,env['now'](),int(shared),json.dumps(snap,ensure_ascii=False)))

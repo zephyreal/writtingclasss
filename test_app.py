@@ -261,7 +261,7 @@ with app.db() as c:
     (code/'app.py').write_text(Path(a.__file__).read_text())
     (code/'review_pipeline.py').write_text((Path(a.__file__).parent/'review_pipeline.py').read_text())
     import shutil
-    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py','adaptive_practice.py','practice_bank.py','seed.py','course_access.py','writing_scores.py'):
+    for module in ('english_course.py','english_speech.py','paper_queue.py','writing_workflow.py','writing_slides.py','adaptive_practice.py','practice_bank.py','seed.py','course_access.py','writing_scores.py','writing_studio.py'):
         shutil.copy2(Path(a.__file__).parent/module,code/module)
     shutil.copytree(Path(a.__file__).parent/'vendor',code/'vendor',dirs_exist_ok=True)
     shutil.copytree(Path(a.__file__).parent/'question_bank',code/'question_bank',dirs_exist_ok=True)
