@@ -22,7 +22,7 @@ DATA.mkdir(parents=True,exist_ok=True)
 (DATA/'files').mkdir(exist_ok=True)
 os.chmod(DATA,0o700)
 DB=DATA/'course.db'
-LIMIT=5_000_000
+LIMIT=3_000_000
 SECURE=os.getenv('COOKIE_SECURE','false').lower()=='true'
 POOL=ThreadPoolExecutor(max_workers=1)
 @asynccontextmanager
@@ -99,9 +99,12 @@ def init():
             c.executemany('INSERT INTO chapters VALUES(?,?,?,?)',CHAPTERS)
             c.executemany('INSERT INTO questions(chapter_id,level,stem,options,answer,explanation) VALUES(?,?,?,?,?,?)',[(ch,lv,s,json.dumps(op,ensure_ascii=False),a,e) for ch,lv,s,op,a,e in QUESTIONS])
             rubric=json.dumps([{'name':'研究问题与目标','max':20},{'name':'结构与逻辑','max':25},{'name':'证据与论证','max':25},{'name':'学术表达','max':20},{'name':'引用规范','max':10}],ensure_ascii=False)
-            c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created) VALUES(?,?,?,?,?)',('论文写作综合作业','请选择与你研究方向相关的主题，提交论文草稿或完整的引言与方法部分。明确研究问题、研究空白、方法和证据；参考文献须真实、可核查。支持 DOCX、文字型 PDF，不超过5 MB。',rubric,'',now()))
+            c.execute('INSERT INTO assignments(title,instructions,rubric,deadline,created) VALUES(?,?,?,?,?)',('论文写作综合作业','请选择与你研究方向相关的主题，提交论文草稿或完整的引言与方法部分。明确研究问题、研究空白、方法和证据；参考文献须真实、可核查。支持 DOCX、文字型 PDF，不超过3 MB。',rubric,'',now()))
         from seed import sync_chapters
         sync_chapters(c,now())
+        # Update only the unchanged system-provided upload instructions.
+        default_instructions='请选择与你研究方向相关的主题，提交论文草稿或完整的引言与方法部分。明确研究问题、研究空白、方法和证据；参考文献须真实、可核查。支持 DOCX、文字型 PDF，不超过3 MB。'
+        c.execute('UPDATE assignments SET instructions=? WHERE title=? AND instructions=?',(default_instructions,'论文写作综合作业',default_instructions.replace('3 MB','5 MB')))
         c.execute("UPDATE submissions SET status='AI任务中断，可重新批改' WHERE status IN ('AI批改中','AI排队中')")
 init()
 
@@ -299,7 +302,7 @@ async def save_upload(file,extensions,limit):
         with path.open('wb') as f:
             while chunk:=await file.read(65536):
                 size+=len(chunk)
-                if size>limit:raise HTTPException(413,'文件不能超过5 MB' if limit==LIMIT else f'文件不能超过 {limit//1024//1024} MiB')
+                if size>limit:raise HTTPException(413,'文件不能超过3 MB' if limit==LIMIT else f'文件不能超过 {limit//1024//1024} MiB')
                 f.write(chunk)
         if not size:raise HTTPException(400,'不能上传空文件')
         if ext=='.pdf' and not path.read_bytes()[:5]==b'%PDF-':raise HTTPException(400,'不是有效PDF文件')

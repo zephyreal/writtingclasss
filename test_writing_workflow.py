@@ -52,7 +52,11 @@ def test_four_rounds_scores_privacy_and_history(setup):
         d=detail(s,aid);sid=d['submission_id'];rid=d['rounds'][-1]['id']
         assert upload(s,aid,n+1).status_code in (400,409)
         assert other.get(f'/api/writing/rounds/{rid}/file').status_code==404
-        assert s.get(f'/api/writing/rounds/{rid}/file').status_code==200
+        own=s.get(f'/api/writing/rounds/{rid}/file')
+        teacher_file=t.get(f'/api/writing/rounds/{rid}/file')
+        assert own.status_code==teacher_file.status_code==200
+        assert teacher_file.content==own.content
+        assert teacher_file.headers['content-disposition'].startswith('attachment;')
         assert a.run_review(sid)
         d=detail(s,aid);r=d['rounds'][-1]
         assert r['review']['score'] is None and r['review']['dimensions']==[]
@@ -311,3 +315,20 @@ def test_safe_errors_and_damaged_password(setup,monkeypatch):
     monkeypatch.setattr(a,'ai_call',fail)
     assert not a.run_review(sid)
     assert '/opt/private' not in detail(s,aid)['status']
+
+
+def test_round_three_mb_limit_and_pdf_teacher_download(setup):
+    t,s,other,aid,calls=setup
+    endpoint=f'/api/writing/assignments/{aid}/submit'
+    too_large=b'%PDF-'+b'x'*(3_000_001-5)
+    r=s.post(endpoint,data={'round_no':1},files={'file':('large.pdf',too_large)})
+    assert r.status_code==413 and '3 MB' in r.json()['detail']
+    assert detail(s,aid)['rounds']==[]
+    raw=b'%PDF-'+b'x'*(3_000_000-5)
+    assert s.post(endpoint,data={'round_no':1},files={'file':('paper.pdf',raw)}).status_code==200
+    d=detail(s,aid);rid=d['rounds'][0]['id']
+    downloaded=t.get(f'/api/writing/rounds/{rid}/file')
+    assert downloaded.status_code==200 and downloaded.content==raw
+    assert downloaded.headers['content-type']=='application/pdf'
+    assert 'paper.pdf' in downloaded.headers['content-disposition']
+    assert other.get(f'/api/writing/rounds/{rid}/file').status_code==404

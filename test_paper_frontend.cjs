@@ -22,6 +22,7 @@ vm.runInContext('user={name:"教师",role:"teacher"};api=async()=>[assignment]',
  r=await vm.runInContext('views.review()',ctx);
  assert(r.html.includes('一键批改未评作业')&&r.html.includes('安排定时批改')&&r.html.includes('data-cancel-review="2"'));
  assert(r.html.includes('82')&&r.html.includes('旧版标准'));
+ assert(r.html.includes('href="/api/submissions/9/file" download>下载原文'));
  ctx.settings={base_url:'https://api.deepseek.com',model:'deepseek-flash',configured:true,review_mode:'scheduled',review_time:'00:30',off_peak_only:true,error_threshold:5,formal_standard:'学术规范要求'};
  vm.runInContext('api=async()=>settings',ctx);
  r=await vm.runInContext('views.settings()',ctx);

@@ -379,9 +379,10 @@ def test_multimodal_payload_usage_and_local_cache(monkeypatch,tmp_path):
     assert rows[0]['local_cache']==1 and rows[0]['input_tokens']==0
     assert rows[1]['input_tokens']==1200 and rows[1]['output_tokens']==100
 
-def test_five_mib_boundary():
+def test_three_mb_boundary():
+    assert a.LIMIT==3_000_000
     s=student('five100')
-    assert s.post('/api/submissions',data={'assignment_id':1},files={'file':('five.pdf',b'%PDF-'+b'x'*(a.LIMIT-5))}).status_code==200
+    assert s.post('/api/submissions',data={'assignment_id':1},files={'file':('three.pdf',b'%PDF-'+b'x'*(a.LIMIT-5))}).status_code==200
     s2=student('five200')
     assert s2.post('/api/submissions',data={'assignment_id':1},files={'file':('large.pdf',b'%PDF-'+b'x'*(a.LIMIT-4))}).status_code==413
 

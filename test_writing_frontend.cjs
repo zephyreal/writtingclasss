@@ -1,6 +1,6 @@
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert');
-const nodes=new Map(),clicks=[];function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,value:'',style:{},addEventListener(){},showModal(){},close(){}});return nodes.get(s)}
-const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener:(name,fn)=>{if(name==='click')clicks.push(fn)}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),setTimeout,clearTimeout,console,FormData:class{},confirm:()=>false});
+let formValues={};const nodes=new Map(),clicks=[];function node(s){if(!nodes.has(s))nodes.set(s,{textContent:'',innerHTML:'',hidden:false,value:'',style:{},listeners:{},addEventListener(k,f){this.listeners[k]=f},showModal(){},close(){}});return nodes.get(s)}
+const ctx=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[],addEventListener:(name,fn)=>{if(name==='click')clicks.push(fn)}},fetch:async()=>({ok:false,status:401,json:async()=>({})}),setTimeout,clearTimeout,console,FormData:class{get(k){return formValues[k]}},confirm:()=>false});
 for(const file of ['app.js','english.js','teacher-writing.js','writing-workflow.js'])vm.runInContext(fs.readFileSync(__dirname+'/static/'+file,'utf8'),ctx);
 ctx.assignment={id:2,title:'研究问题 <script>',instructions:'科研写作',workflow:1,deadline:'',rubric:[]};
 vm.runInContext("user={role:'student'};api=async()=>[assignment]",ctx);
@@ -10,6 +10,12 @@ vm.runInContext("user={role:'student'};api=async()=>[assignment]",ctx);
  ctx.data={assignment:ctx.assignment,stages:[1,2,3,4].map(n=>({title:'阶段'+n,goal:'目标',items:['要求']})),rounds:[],can_submit:true,surveys:[],briefings:[]};
  vm.runInContext('api=async()=>data',ctx);await vm.runInContext('openWriting(2)',ctx);
  assert(node('#content').innerHTML.includes('确认提交第 1 轮')&&node('#content').innerHTML.includes('30秒写作信心自评'));
+ assert(node('#content').innerHTML.includes('最多 3 MB'));
+ formValues={file:{size:3000001,name:'large.pdf'}};
+ vm.runInContext('uploadCalls=0;api=async()=>{uploadCalls++;return data}',ctx);
+ await node('#writing-upload').listeners.submit({target:{querySelector:()=>({})},preventDefault(){}});
+ assert(vm.runInContext('uploadCalls',ctx)===0&&node('#toast').textContent.includes('3 MB'));
+ vm.runInContext('api=async()=>data',ctx);
  ctx.data.rounds=[{id:3,round_no:1,filename:'初稿.docx',review:{summary:'只给意见',strengths:[],issues:[{id:'r1-i1',category:'论证结构',problem:'论证问题',suggestion:'限定范围',quote:'原文',needs_review:false}],tracking:[],next_actions:[],practice:{a:'案例A',b:'案例B',question:'比较',analysis:'参考分析'}}}];ctx.data.can_submit=true;
  await vm.runInContext('openWriting(2)',ctx);
  const html=node('#content').innerHTML;
