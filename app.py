@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Depends
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
@@ -932,4 +932,10 @@ english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_s
 
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 @app.get('/')
-def index():return FileResponse(ROOT/'static'/'index.html')
+def index():
+    template=(ROOT/'static'/'index.html').read_text()
+    def version(match):
+        name=match.group(2);digest=hashlib.sha256((ROOT/'static'/name).read_bytes()).hexdigest()[:16]
+        return f'{match.group(1)}="/static/{name}?v={digest}"'
+    template=re.sub(r'(src|href)="/static/([A-Za-z0-9_-]+\.(?:js|css))(?:\?[^"]*)?"',version,template)
+    return HTMLResponse(template,headers={'Cache-Control':'no-cache'})

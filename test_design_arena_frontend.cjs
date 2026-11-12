@@ -25,7 +25,7 @@ vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competition
  let resolve;ctx.waiting=new Promise(r=>resolve=r);vm.runInContext('api=async()=>waiting',ctx);node('#modalBody').innerHTML='unchanged';const wait=vm.runInContext('arenaReplay(5)',ctx);vm.runInContext("user={id:4,role:'student'}",ctx);resolve(ctx.replay);await wait;assert(node('#modalBody').innerHTML==='unchanged');
  vm.runInContext("user={id:1,role:'teacher'};api=async p=>p==='/arena/competitions'?{competitions:[competition]}:p.endsWith('entries')?data:{sealed:true,rows:[]}",ctx);
  view=await vm.runInContext('views.arena()',ctx);assert(view.html.includes('配置独立评测机')&&view.html.includes('成绩尚未开放'));
- vm.runInContext('arenaCreate()',ctx);assert(node('#modalBody').innerHTML.includes('发布后冻结')&&node('#modalBody').innerHTML.includes('结课赛'));
+ vm.runInContext('arenaCreate()',ctx);assert(node('#modalBody').innerHTML.includes('发布后冻结')&&node('#modalBody').innerHTML.includes('结课赛'));assert(node('#modalBody').innerHTML.includes('化神挑战赛（推荐）')&&node('#modalBody').innerHTML.includes('value="150"'));
  const secret={value:'temporary-worker-key',textContent:'temporary-worker-key'};ctx.document.getElementById=id=>id==='arena-worker-secret'?secret:null;node('#modalBody').textContent='temporary-worker-key';node('#modal').listeners.close();assert(secret.value===''&&secret.textContent===''&&node('#modalBody').textContent==='','Closing configuration must clear credentials from the DOM');
  let scheduled=null,signal=null;ctx.setTimeout=(fn,ms)=>{if(ms>=6000)scheduled=fn;return 1};ctx.clearTimeout=()=>{};ctx.AbortController=AbortController;
  ctx.running={id:9,alias:'测试版本',note:'待测',created:'2026-11-12',model_hash:'a'.repeat(64),source_name:'',share_replay:false,state:'running',result:null,sealed:false,completed_games:0,total_games:40,phase:'validating'};
@@ -52,5 +52,7 @@ vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competition
  vm.runInContext("arenaQueueFilter='attention';arenaApplyFilter()",ctx);assert.deepStrictEqual(queue.map(r=>r.hidden),[false,true,true,true,false]);assert(node('#arena-filter-count').textContent==='显示 2 / 5 个版本');
  vm.runInContext("arenaQueueFilter='queued';arenaApplyFilter()",ctx);assert.deepStrictEqual(queue.map(r=>r.hidden),[true,false,true,true,true]);
  vm.runInContext("arenaQueueFilter='all';arenaApplyFilter();arenaStopPolling()",ctx);assert(queue.every(r=>!r.hidden));
+ ctx.data={...ctx.data,competition:{...ctx.competition,config:{...ctx.competition.config,engine:'gomoku-deity-v1',deity_sha:'d'.repeat(64),simulations:150}}};
+ view=await vm.runInContext('views.arena()',ctx);assert(view.html.includes('严格VCF')&&view.html.includes('150次搜索')&&view.html.includes('d'.repeat(64))&&!view.html.includes('比赛采用固定MCTS v1'));
  console.log('Model arena: upload bounds, safe rendering, worker readiness, private roles, replay stepping and late-response privacy passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

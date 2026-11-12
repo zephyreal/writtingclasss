@@ -32,9 +32,10 @@ install -d -o arena-evaluator -g arena-evaluator -m 700 /var/lib/course-arena /e
 if [ "$ARENA_SOURCE_ROOT" != /opt/course-arena ]; then
     cp "$ARENA_SOURCE_ROOT/arena_engine.py" /opt/course-arena/
     cp "$ARENA_SOURCE_ROOT/.dockerignore" /opt/course-arena/
-    for file in Dockerfile requirements.txt requirements-worker.txt runner.py model_service.py worker.py smoke.py example_model.py train_example.py local_check.py STUDENT.md; do
+    for file in Dockerfile requirements.txt requirements-worker.txt runner.py model_service.py deity.py deity_bridge.cjs worker.py smoke.py example_model.py train_example.py local_check.py STUDENT.md; do
         cp "$ARENA_SOURCE_ROOT/arena/$file" /opt/course-arena/arena/
     done
+    cp "$ARENA_SOURCE_ROOT/course_assets/gomoku/ai-worker.js" /opt/course-arena/course_assets/gomoku/
     cp "$ARENA_SOURCE_ROOT/course_assets/gomoku/gomoku_uint8_qop_u8u8.onnx" /opt/course-arena/course_assets/gomoku/
 fi
 python3 -m venv /opt/course-arena/.venv
@@ -48,6 +49,7 @@ fi
 cd /opt/course-arena
 docker build -f arena/Dockerfile -t writing-course-arena:v1 .
 runuser -u arena-evaluator -- env ARENA_WORK_DIR=/var/lib/course-arena /opt/course-arena/.venv/bin/python -m arena.smoke --image writing-course-arena:v1
+runuser -u arena-evaluator -- env ARENA_WORK_DIR=/var/lib/course-arena /opt/course-arena/.venv/bin/python -m arena.smoke --image writing-course-arena:v1 --deity
 # Start only after a genuine two-sandbox acceptance match has passed.
 install -m 644 "$ARENA_SOURCE_ROOT/deploy/course-arena-worker.service" /etc/systemd/system/course-arena-worker.service
 systemctl daemon-reload

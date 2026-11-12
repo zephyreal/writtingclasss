@@ -16,7 +16,7 @@ from typing import Literal
 from fastapi import Depends,File,Form,HTTPException,Request,UploadFile
 from fastapi.responses import FileResponse,StreamingResponse,JSONResponse
 from pydantic import BaseModel,Field,StrictInt
-from arena_engine import ENGINE,openings,verify_games
+from arena_engine import ENGINE,DEITY_ENGINE,openings,verify_games
 
 BJT=timezone(timedelta(hours=8))
 MODEL_LIMIT=20_000_000
@@ -103,7 +103,8 @@ class Competition(BaseModel):
     state:Literal['draft','open']='open'
     deadline:str=Field(default='',max_length=40)
     pairs:int=Field(default=20,ge=1,le=50)
-    simulations:int=Field(default=16,ge=2,le=128)
+    opponent:Literal['shared','deity']='shared'
+    simulations:int=Field(default=16,ge=2,le=150)
     move_ms:int=Field(default=2000,ge=100,le=10000)
     job_seconds:int=Field(default=1800,ge=60,le=7200)
     daily_limit:int=Field(default=2,ge=1,le=10)
@@ -119,6 +120,8 @@ class WorkerSetup(BaseModel):worker_id:str=Field(default='course-arena-1',patter
 class WorkerInfo(BaseModel):
     worker_id:str=Field(max_length=60)
     fingerprint:str=Field(pattern='^[0-9a-f]{64}$')
+    engines:list[Literal[ENGINE,DEITY_ENGINE]]=Field(default_factory=lambda:[ENGINE],max_length=2)
+    deity_sha:str=Field(default='',pattern='^([0-9a-f]{64})?$')
     ready:bool=True
     error:str=Field(default='',max_length=200)
 class Lease(BaseModel):lease:str=Field(min_length=20,max_length=100)
@@ -192,6 +195,7 @@ def register(app,env):
     @app.post('/api/arena/admin/competitions')
     def create(x:Competition,u=Depends(teacher)):
         if not x.title.strip():raise HTTPException(400,'请填写比赛名称')
+        if x.opponent=='deity' and (x.simulations!=150 or x.move_ms<2000):raise HTTPException(400,'化神挑战赛学生固定150次搜索，每步时限至少2000毫秒')
         due=deadline_value(x.deadline)
         if x.mode=='final' and (not due or due<=time.time()):raise HTTPException(400,'结课赛须设置将来的截止时间')
         source=Path(env['ROOT'])/'course_assets/gomoku/gomoku_uint8_qop_u8u8.onnx'
@@ -199,7 +203,8 @@ def register(app,env):
         folder=Path(env['DATA'])/'arena-baselines';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/(secrets.token_hex(16)+'.onnx');shutil.copyfile(source,path)
         try:
-            config={'engine':ENGINE,'pairs':x.pairs,'simulations':x.simulations,'move_ms':x.move_ms,'job_seconds':x.job_seconds,'daily_limit':x.daily_limit,'memory_mb':1024,'threads':1}
+            config={'engine':DEITY_ENGINE if x.opponent=='deity' else ENGINE,'pairs':x.pairs,'simulations':x.simulations,'move_ms':x.move_ms,'job_seconds':x.job_seconds,'daily_limit':x.daily_limit,'memory_mb':1024,'threads':1}
+            if x.opponent=='deity':config['deity_sha']=hashlib.sha256((Path(env['ROOT'])/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()
             bank=openings(secrets.token_hex(24),x.pairs)
             with db() as c:
                 cid=c.execute('INSERT INTO arena_competitions(title,instructions,mode,state,deadline,published,config,openings,baseline_path,baseline_hash,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
@@ -371,7 +376,7 @@ def register(app,env):
                 games=[g for g in result['replays'] if g['student_color']==color]
                 wins=sum(g['winner']==color for g in games);draws=sum(g['winner']==0 for g in games)
                 colors.append({'label':label,'games':len(games),'wins':wins,'draws':draws,'losses':len(games)-wins-draws,'faults':sum(bool(g.get('fault')) for g in games)})
-            payload={'schema':'arena-report-v1','competition':public_comp(a),'entry':entry_public(r,a,u),'colors':colors,'replays':result['replays'],'engine':ENGINE,'fingerprint':r['fingerprint'],'exported_at':env['now']()}
+            payload={'schema':'arena-report-v1','competition':public_comp(a),'entry':entry_public(r,a,u),'colors':colors,'replays':result['replays'],'engine':json.loads(a['config'])['engine'],'fingerprint':r['fingerprint'],'exported_at':env['now']()}
             audit(c,u['id'],'download-report',eid)
         if format=='json':
             content=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8');media='application/json'
@@ -379,13 +384,15 @@ def register(app,env):
             esc=lambda v:html.escape(str(v if v is not None else ''))
             rows=''.join('<tr>'+''.join('<td>'+esc(item[key])+'</td>' for key in ('label','games','wins','draws','losses','faults'))+'</tr>' for item in colors)
             cfg=payload['competition']['config']
+            rules=('教师：冻结化神引擎（严格VCF＋50/100/150自适应MCTS）；学生：统一150次MCTS。双方每步相同时限。' if cfg['engine']==DEITY_ENGINE else '双方相同固定MCTS搜索预算。')
             content=(f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>模型评测报告 #{eid}</title>'
                 '<style>body{max-width:880px;margin:36px auto;padding:0 20px;font:16px/1.7 system-ui;color:#20334b}h1{font-size:26px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d7e0eb;padding:8px;text-align:left}code{overflow-wrap:anywhere}p{white-space:pre-wrap}.note{padding:12px;background:#eef3f9}@media print{body{margin:0}}</style>'
                 f'<h1>{esc(a["title"])} · 版本 #{eid}</h1><p>参赛昵称：{esc(r["alias"])}\n提交时间：{esc(r["created"])}\n记录状态：{esc(r["state"])}</p>'
                 +('<p class="note">本版成绩已撤销，不计入排行榜；本报告仅为历史记录。</p>' if r['state']=='disqualified' else '')
                 +f'<h2>比赛分：{esc(result["score"])} / 100</h2><p>{result["wins"]}胜 / {result["draws"]}平 / {result["losses"]}负，共{result["games"]}局。胜100、平50、负0，取全部对局平均。比赛分不等于课程总评。</p>'
                 f'<table><tr><th>执棋</th><th>局数</th><th>胜</th><th>平</th><th>负</th><th>异常判负局</th></tr>{rows}</table>'
-                f'<h2>评测标准</h2><p>15×15，无禁手，连五及以上获胜。双方相同MCTS搜索预算。\n每步{cfg["simulations"]}次搜索，上限{cfg["move_ms"]}毫秒；整次上限{cfg["job_seconds"]}秒。\n引擎：{esc(ENGINE)}（与网页化神档不同）</p>'
+                f'<h2>评测标准</h2><p>15×15，无禁手，连五及以上获胜。{esc(rules)}\n学生每步{cfg["simulations"]}次搜索，上限{cfg["move_ms"]}毫秒；整次上限{cfg["job_seconds"]}秒。\n引擎：{esc(cfg["engine"])}</p>'
+                f'<p>化神代码 SHA-256：<code>{esc(cfg.get("deity_sha","不适用"))}</code></p>'
                 f'<p>本版模型 SHA-256：<code>{esc(r["model_hash"])}</code></p><p>教师基准 SHA-256：<code>{esc(a["baseline_hash"])}</code></p><p>评测环境指纹：<code>{esc(r["fingerprint"])}</code></p>'
                 f'<h2>本版改进说明</h2><p>{esc(r["note"] or "未填写")}</p><p class="note">对局数量有限，小分差不代表能力必然领先。异常判负已计入对应负局。完整棋谱可在网页复盘，或下载JSON报告留档。</p><p>导出时间：{esc(payload["exported_at"])}</p></html>').encode('utf-8');media='text/html'
         return StreamingResponse(iter([content]),media_type=media,headers={'Content-Disposition':f'attachment; filename="arena-entry-{eid}.{format}"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; sandbox"})
@@ -465,10 +472,13 @@ def register(app,env):
             r=None;a=None
             for candidate in rows:
                 comp=get_comp(c,candidate['competition_id'])
+                cfg=json.loads(comp['config'])
+                if cfg['engine'] not in x.engines:continue
+                if cfg['engine']==DEITY_ENGINE and cfg.get('deity_sha')!=x.deity_sha:continue
                 if comp['fingerprint'] and comp['fingerprint']!=x.fingerprint:continue
                 r=candidate;a=comp;break
             if r is None:
-                if rows:c.execute("UPDATE arena_settings SET ready=0,last_error='待评比赛的镜像或CPU与冻结环境不符，请恢复原环境或另建比赛' WHERE id=1")
+                if rows:c.execute("UPDATE arena_settings SET ready=0,last_error='待评比赛的引擎版本、镜像或CPU与评测机不匹配，请升级或恢复对应环境' WHERE id=1")
                 return {'job':None}
             if not a['fingerprint']:c.execute('UPDATE arena_competitions SET fingerprint=? WHERE id=?',(x.fingerprint,a['id']))
             lease=secrets.token_urlsafe(32)

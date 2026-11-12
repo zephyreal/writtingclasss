@@ -416,3 +416,16 @@ def test_gomoku_local_assets_authentication_and_paths():
     assert s.get('/courses/design/gomoku/gomoku_single.onnx').status_code==200
     assert s.post('/api/logout').status_code==200
     assert s.get('/courses/design/gomoku/ai-worker.js').status_code==401
+
+
+def test_entry_page_versions_assets_by_content(tmp_path,monkeypatch):
+    import re
+    folder=tmp_path/'static';folder.mkdir()
+    (folder/'index.html').write_text('<script src="/static/app.js?v=old"></script><link href="/static/style.css">')
+    (folder/'app.js').write_text('first');(folder/'style.css').write_text('body{}')
+    monkeypatch.setattr(a,'ROOT',tmp_path)
+    one=client().get('/');assert one.status_code==200 and one.headers['cache-control']=='no-cache'
+    assert 'app.js?v='+a.hashlib.sha256(b'first').hexdigest()[:16] in one.text
+    (folder/'app.js').write_text('second')
+    two=client().get('/')
+    assert 'app.js?v='+a.hashlib.sha256(b'second').hexdigest()[:16] in two.text and one.text!=two.text

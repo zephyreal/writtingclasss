@@ -90,3 +90,40 @@ def test_trusted_arbiter_never_mounts_both_models_or_game_manifest(tmp_path,monk
     result=worker.execute({'id':1,'lease':'private-lease','config':{'engine':ENGINE,'simulations':2,'move_ms':5000,'job_seconds':60,'memory_mb':1024},'openings':bank},'frozen-image')
     assert result['status']=='completed' and verify_games(bank,result['games'],5000)['score']==50
     assert seen.count('student')==seen.count('baseline') and 'student' in seen
+
+
+def test_original_deity_rules_vcf_and_adaptive_search():
+    from arena.deity import DeityClient
+    engine=Path(__file__).parent/'course_assets/gomoku/ai-worker.js'
+    client=DeityClient(engine)
+    try:
+        board=[0]*225
+        for i in (112,113,114,115):board[i]=1
+        predict=lambda board:(0,[1/225]*225)
+        result=client.choose(board,predict,time.monotonic()+5)
+        assert result['source']=='rule' and result['move'] in (111,116)
+        board=[-v for v in board];result=client.choose(board,predict,time.monotonic()+5)
+        assert result['source']=='rule' and result['move'] in (111,116)
+        board=[0]*225
+        for i in (112,113,114):board[i]=1
+        result=client.choose(board,predict,time.monotonic()+5)
+        assert result['source']=='strict-vcf' and result['vctNodes']>0
+        result=client.choose([0]*225,predict,time.monotonic()+5)
+        assert result['source']=='vcf-fallback-mcts' and result['simulations'] in (50,100,150)
+        # Reuse the real bundled network for a non-tactical search, without any browser/CDN inference.
+        from arena.runner import load_session
+        network=load_session(Path(__file__).parent/'course_assets/gomoku/gomoku_uint8_qop_u8u8.onnx')
+        result=client.choose([0]*225,network,time.monotonic()+10)
+        assert 0<=result['move']<225
+    finally:client.close()
+
+
+def test_teacher_deity_fault_never_becomes_student_loss():
+    from arena_engine import play_game,DEITY_ENGINE
+    class Agent:
+        def predict(self,board,deadline):return 0,[1/225]*225
+        def choose(self,board,deadline):raise TimeoutError()
+    with pytest.raises(RuntimeError,match='教师基准'):
+        play_game(openings('teacher-timeout',1)[0],-1,Agent(),Agent(),{'engine':DEITY_ENGINE,'simulations':150,'move_ms':1000},0)
+    command=container_command('image',Path('/tmp/input'),'test',512,deity=True)
+    assert '--env=ARENA_DEITY=1' in command and '--runtime=runsc' in command

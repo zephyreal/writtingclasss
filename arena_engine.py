@@ -4,6 +4,8 @@ import random
 import time
 
 ENGINE='gomoku-model-v1'
+DEITY_ENGINE='gomoku-deity-v1'
+ENGINES=(ENGINE,DEITY_ENGINE)
 SIZE=15
 CELLS=225
 DIRECTIONS=((0,1),(1,0),(1,1),(1,-1))
@@ -116,7 +118,9 @@ def play_game(opening,student_color,student,baseline,cfg,index):
         color=1 if len(moves)%2==0 else -1;agent=student if color==student_color else baseline
         start=time.monotonic();deadline=start+cfg['move_ms']/1000
         try:
-            move=choose(board,color,agent.predict,cfg['simulations'],deadline)
+            if color!=student_color and cfg.get('engine')==DEITY_ENGINE:
+                move=agent.choose([v*color for v in board],deadline)
+            else:move=choose(board,color,agent.predict,cfg['simulations'],deadline)
             elapsed=(time.monotonic()-start)*1000
             if elapsed>cfg['move_ms']:raise TimeoutError()
             if type(move) is not int or not 0<=move<225 or board[move]:raise ArithmeticError()

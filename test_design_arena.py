@@ -234,13 +234,14 @@ def test_progress_is_monotonic_and_never_counts_as_a_score(setup):
 
 
 @pytest.mark.skipif(importlib.util.find_spec('onnxruntime') is None,reason='真实教师模型联调需要独立评测机推理依赖')
-def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatch):
+@pytest.mark.parametrize('opponent',['shared','deity'])
+def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatch,opponent):
     import hashlib
     import httpx
     from arena.runner import ModelClient
     from arena.worker import Worker
     t,s,other,registered_worker=setup
-    cid=competition(t,move_ms=5000,job_seconds=120)
+    cid=competition(t,opponent=opponent,simulations=150 if opponent=='deity' else 2,move_ms=5000,job_seconds=600)
     baseline=Path(a.ROOT)/'course_assets/gomoku/gomoku_uint8_qop_u8u8.onnx'
     expected_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
     response=s.post(f'/api/arena/competitions/{cid}/entries',data={'alias':'真实基准自测'},files={'model':('baseline-copy.onnx',baseline.read_bytes())})
@@ -249,11 +250,17 @@ def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatc
     # This verifies HTTP leases, artifact transfer, inference, game records, result admission and ranking;
     # it deliberately does NOT claim to validate Docker/gVisor isolation.
     class TrustedBaselineAdapter:
-        def __init__(self,image,folder,name,memory_mb):
+        def __init__(self,image,folder,name,memory_mb,deity=False,deity_sha=''):
+            from arena.deity import DeityClient
+            self.deity=DeityClient(Path(a.ROOT)/'course_assets/gomoku/ai-worker.js') if deity else None
+            if deity:assert deity_sha==hashlib.sha256((Path(a.ROOT)/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()
             assert hashlib.sha256((folder/'model.onnx').read_bytes()).hexdigest()==expected_hash
             assert memory_mb==512;self.name=name;self.native=ModelClient(folder/'model.onnx')
         def predict(self,board,deadline):return self.native.predict(board,deadline)
-        def close(self):self.native.close()
+        def choose(self,board,deadline):return self.deity.choose(board,lambda b:self.native.predict(b,deadline),deadline)['move']
+        def close(self):
+            self.native.close()
+            if self.deity:self.deity.close()
     monkeypatch.setattr('arena.worker.DockerAgent',TrustedBaselineAdapter)
     monkeypatch.setattr('arena.worker.remove_container',lambda name:None)
     monkeypatch.setattr('arena.worker.runtime_info',lambda image:('trusted-fixture-image','c'*64))
@@ -270,11 +277,13 @@ def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatc
     finally:evaluator.client.close()
     records=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries']
     assert records[0]['state']=='completed' and records[0]['model_hash']==expected_hash
-    assert records[0]['result']['games']==2 and records[0]['result']['score']==50
+    assert records[0]['result']['games']==2 and 0<=records[0]['result']['score']<=100
+    if opponent=='shared':assert records[0]['result']['score']==50
     board=s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']
-    assert board[0]['entry_id']==eid and board[0]['score']==50 and board[0]['rank']==1
+    assert board[0]['entry_id']==eid and board[0]['score']==records[0]['result']['score'] and board[0]['rank']==1
     games=s.get(f'/api/arena/entries/{eid}/replay').json()['games']
     assert len(games)==2 and {g['student_color'] for g in games}=={-1,1}
+    assert all(not g['fault'] for g in games)
     assert sum(path.endswith('/files/model') for method,path in outgoing)==1
     assert sum(path.endswith('/files/baseline') for method,path in outgoing)==1
     assert any(path.endswith('/result') for method,path in outgoing)
@@ -334,3 +343,26 @@ def test_quota_counts_saved_versions_not_withdrawals_or_other_students(setup):
     with a.db() as c:
         c.execute('UPDATE arena_entries SET created_ts=? WHERE competition_id=?',(time.time()-86400*2,cid))
     assert s.get(endpoint).json()['quota']['remaining']==2
+
+
+def test_deity_is_frozen_and_old_workers_cannot_claim_it(setup):
+    from arena_engine import DEITY_ENGINE,ENGINE
+    import hashlib
+    t,s,other,w=setup
+    invalid=t.post('/api/arena/admin/competitions',json={'title':'化神赛','opponent':'deity','simulations':16})
+    assert invalid.status_code==400
+    cid=competition(t,opponent='deity',simulations=150,move_ms=5000)
+    cfg=s.get(f'/api/arena/competitions/{cid}/entries').json()['competition']['config']
+    sha=hashlib.sha256((Path(a.ROOT)/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()
+    assert cfg['engine']==DEITY_ENGINE and cfg['deity_sha']==sha
+    eid=submit(s,cid).json()['id']
+    assert claim(w) is None
+    body={'worker_id':'arena-node-1','fingerprint':'a'*64,'engines':[ENGINE,DEITY_ENGINE],'deity_sha':'b'*64}
+    assert w.post('/api/arena/worker/claim',json=body).json()['job'] is None
+    body['deity_sha']=sha;job=w.post('/api/arena/worker/claim',json=body).json()['job'];assert job['id']==eid
+    finish(w,job)
+    report=s.get(f'/api/arena/entries/{eid}/report?format=json').json()
+    assert report['engine']==DEITY_ENGINE and report['competition']['config']['deity_sha']==sha
+    assert '严格VCF' in s.get(f'/api/arena/entries/{eid}/report').text
+    t.put(f'/api/arena/admin/competitions/{cid}',json={'opponent':'shared','engine':ENGINE})
+    assert s.get(f'/api/arena/competitions/{cid}/entries').json()['competition']['config']==cfg

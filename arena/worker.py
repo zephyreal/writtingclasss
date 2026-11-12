@@ -19,13 +19,13 @@ from urllib.parse import urlparse
 import httpx
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from arena_engine import ENGINE,play_game
+from arena_engine import ENGINE,DEITY_ENGINE,ENGINES,play_game
 
 
-def container_command(image,folder,name,memory_mb):
+def container_command(image,folder,name,memory_mb,deity=False):
     return ['docker','run','--interactive','--name',name,'--runtime=runsc','--network=none','--read-only','--cap-drop=ALL',
         '--security-opt=no-new-privileges:true','--label=course-arena-managed=1','--log-driver=none','--pids-limit=64','--memory='+str(memory_mb)+'m','--memory-swap='+str(memory_mb)+'m',
-        '--cpus=1','--user=65534:65534','--tmpfs=/tmp:rw,noexec,nosuid,size=64m','--mount=type=bind,src='+str(folder)+',dst=/input,readonly',image]
+        *(['--env=ARENA_DEITY=1'] if deity else []),'--cpus=1','--user=65534:65534','--tmpfs=/tmp:rw,noexec,nosuid,size=64m','--mount=type=bind,src='+str(folder)+',dst=/input,readonly',image]
 
 
 def remove_container(name):
@@ -42,15 +42,15 @@ def runtime_info(image):
     runtime_version=subprocess.check_output([runtime_path,'--version'],text=True,timeout=10).strip()
     cpu=''
     if Path('/proc/cpuinfo').exists():cpu=next((line for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),'')
-    source=Path(__file__).read_bytes()+(Path(__file__).parents[1]/'arena_engine.py').read_bytes()
+    source=b''.join(path.read_bytes() for path in [Path(__file__),Path(__file__).parents[1]/'arena_engine.py',Path(__file__).parent/'deity.py',Path(__file__).parent/'deity_bridge.cjs',Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js'])
     fingerprint=hashlib.sha256(json.dumps({'engine':ENGINE,'arbiter':hashlib.sha256(source).hexdigest(),'image':digest,'machine':platform.machine(),'cpu':cpu,'runtime':'runsc','runtime_version':runtime_version,'kernel':platform.release()},sort_keys=True).encode()).hexdigest()
     return digest,fingerprint
 
 
 class DockerAgent:
-    def __init__(self,image,folder,name,memory_mb):
+    def __init__(self,image,folder,name,memory_mb,deity=False,deity_sha=''):
         self.name=name;self.messages=queue.Queue(maxsize=2);self.bad=threading.Event();self.closed=False
-        self.process=subprocess.Popen(container_command(image,folder,name,memory_mb),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=65536)
+        self.process=subprocess.Popen(container_command(image,folder,name,memory_mb,deity),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=65536)
         def receive():
             try:
                 while True:
@@ -74,6 +74,7 @@ class DockerAgent:
         try:
             message=self.next(time.monotonic()+30)
             if not isinstance(message,dict) or message.get('ready') is not True:raise ValueError('模型校验失败：'+str(message.get('error','未返回就绪信息'))[:160] if isinstance(message,dict) else '模型加载进程异常')
+            if deity and message.get('deity_sha')!=deity_sha:raise ValueError('化神镜像与冻结代码校验值不匹配')
         except Exception:self.close();raise
     def next(self,deadline):
         if self.bad.is_set():raise ValueError('模型输出协议或日志超过限制')
@@ -98,6 +99,14 @@ class DockerAgent:
         if total<=0:
             policy=[float(v==0) for v in board];total=sum(policy)
         return float(value),[p/total if total else 0 for p in policy]
+    def choose(self,board,deadline):
+        request_id=secrets.token_hex(12)
+        self.process.stdin.write(json.dumps({'request_id':request_id,'op':'choose','board':board},separators=(',',':')).encode()+b'\n');self.process.stdin.flush()
+        reply=self.next(deadline)
+        if not isinstance(reply,dict) or reply.get('request_id')!=request_id:raise ValueError('化神响应标识不匹配')
+        move=reply.get('move')
+        if type(move) is not int or not 0<=move<225 or board[move]:raise ValueError('化神落子无效')
+        return move
     def close(self):
         if self.closed:return
         self.closed=True;remove_container(self.name)
@@ -133,6 +142,11 @@ class Worker:
         if digest.hexdigest()!=expected:raise ValueError('文件校验值不一致')
     def execute(self,job,image):
         cancelled=threading.Event();done=threading.Event();budget=threading.Event();names=set();names_lock=threading.Lock()
+        if job['config'].get('engine',ENGINE) not in ENGINES:raise ValueError('不支持的比赛引擎')
+        deity=job['config'].get('engine')==DEITY_ENGINE
+        if deity:
+            digest=hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()
+            if digest!=job['config'].get('deity_sha'):raise ValueError('冻结化神引擎版本不匹配，请恢复对应版本')
         until=time.monotonic()+job['config']['job_seconds'];progress={'completed_games':0,'phase':'validating'}
         def terminate():
             with names_lock:active=list(names)
@@ -159,7 +173,9 @@ class Worker:
                     if budget.is_set() or time.monotonic()>until:raise TimeoutError('整场资源预算已用完')
                     name='course-arena-'+self.worker_id+'-'+secrets.token_hex(8)
                     with names_lock:names.add(name)
-                    try:return DockerAgent(image,folders[kind],name,job['config']['memory_mb']//2)
+                    try:
+                        if deity and kind=='baseline':return DockerAgent(image,folders[kind],name,job['config']['memory_mb']//2,deity=True,deity_sha=job['config']['deity_sha'])
+                        return DockerAgent(image,folders[kind],name,job['config']['memory_mb']//2)
                     except Exception:
                         remove_container(name)
                         with names_lock:names.discard(name)
@@ -198,7 +214,7 @@ class Worker:
             done.set();heartbeat.join(timeout=35);terminate()
     def tick(self):
         image,fingerprint=runtime_info(self.image);self.fingerprint=fingerprint;self.ping(True)
-        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True})
+        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True,'engines':list(ENGINES),'deity_sha':hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()})
         job=reply.get('job')
         if not job:return False
         try:result=self.execute(job,image)
