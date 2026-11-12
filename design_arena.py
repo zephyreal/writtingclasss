@@ -32,6 +32,9 @@ def migrate(c):
     CREATE INDEX IF NOT EXISTS arena_pending ON arena_entries(state,id);
     CREATE INDEX IF NOT EXISTS arena_user_versions ON arena_entries(competition_id,user_id,id);
     ''')
+    cols={r['name'] for r in c.execute('PRAGMA table_info(arena_entries)')}
+    if 'completed_games' not in cols:c.execute('ALTER TABLE arena_entries ADD COLUMN completed_games INTEGER NOT NULL DEFAULT 0')
+    if 'phase' not in cols:c.execute("ALTER TABLE arena_entries ADD COLUMN phase TEXT NOT NULL DEFAULT 'queued'")
 
 
 def deadline_value(value):
@@ -85,6 +88,8 @@ def entry_public(r,a,u):
     if result:result={k:v for k,v in result.items() if k!='replays'}
     return {'id':r['id'],'competition_id':r['competition_id'],'alias':r['alias'],'note':r['note'],'state':r['state'],
         'error':r['error'],'model_name':r['model_name'],'model_hash':r['model_hash'],'source_name':r['source_name'],
+        'completed_games':json.loads(a['config'])['pairs']*2 if r['state'] in ('completed','disqualified') else r['completed_games'],
+        'total_games':json.loads(a['config'])['pairs']*2,'phase':r['phase'],
         'share_replay':bool(r['share_replay']),'created':r['created'],'result':result,'sealed':not visible and r['state']=='completed',
         'fingerprint':r['fingerprint'] if u['role']=='teacher' else '', 'user_id':r['user_id'] if u['role']=='teacher' else None}
 
@@ -116,6 +121,9 @@ class WorkerInfo(BaseModel):
     error:str=Field(default='',max_length=200)
 class Lease(BaseModel):lease:str=Field(min_length=20,max_length=100)
 class Claim(WorkerInfo):pass
+class Heartbeat(Lease):
+    completed_games:StrictInt|None=Field(default=None,ge=0,le=100)
+    phase:Literal['validating','playing']|None=None
 class Game(BaseModel):
     index:StrictInt=Field(ge=0,le=99)
     student_color:Literal[-1,1]
@@ -370,7 +378,7 @@ def register(app,env):
             a=get_comp(c,r['competition_id'])
             if r['state'] not in ('failed','interrupted'):raise HTTPException(409,'仅可重试评测基础设施失败的任务，模型不合格请由学生修改重交')
             if a['mode']=='final' and a['published']:raise HTTPException(409,'请先撤回结课赛成绩发布再重试')
-            c.execute("UPDATE arena_entries SET state='pending',error='',result=NULL,lease_hash='',lease_until=0 WHERE id=?",(eid,));audit(c,u['id'],'retry',json.dumps({'entry':eid,'reason':x.reason},ensure_ascii=False))
+            c.execute("UPDATE arena_entries SET state='pending',error='',result=NULL,lease_hash='',lease_until=0,completed_games=0,phase='queued' WHERE id=?",(eid,));audit(c,u['id'],'retry',json.dumps({'entry':eid,'reason':x.reason},ensure_ascii=False))
         return {'ok':True}
 
     @app.post('/api/arena/admin/entries/{eid}/exclude')
@@ -407,13 +415,20 @@ def register(app,env):
                 return {'job':None}
             if not a['fingerprint']:c.execute('UPDATE arena_competitions SET fingerprint=? WHERE id=?',(x.fingerprint,a['id']))
             lease=secrets.token_urlsafe(32)
-            c.execute("UPDATE arena_entries SET state='running',lease_hash=?,lease_until=?,started=?,fingerprint=?,error='' WHERE id=?",(hashlib.sha256(lease.encode()).hexdigest(),time.time()+90,time.time(),x.fingerprint,r['id']))
+            c.execute("UPDATE arena_entries SET state='running',lease_hash=?,lease_until=?,started=?,fingerprint=?,error='',completed_games=0,phase='validating' WHERE id=?",(hashlib.sha256(lease.encode()).hexdigest(),time.time()+90,time.time(),x.fingerprint,r['id']))
             return {'job':{'id':r['id'],'competition_id':a['id'],'lease':lease,'config':json.loads(a['config']),'openings':json.loads(a['openings']),'model_hash':r['model_hash'],'baseline_hash':a['baseline_hash'],'fingerprint':x.fingerprint}}
 
     @app.post('/api/arena/worker/jobs/{eid}/heartbeat')
-    def heartbeat(eid:int,x:Lease,auth=Depends(worker)):
+    def heartbeat(eid:int,x:Heartbeat,auth=Depends(worker)):
         with db() as c:
-            c.execute('BEGIN IMMEDIATE');leased(c,eid,x.lease)
+            c.execute('BEGIN IMMEDIATE');r=leased(c,eid,x.lease)
+            cfg=json.loads(get_comp(c,r['competition_id'])['config'])
+            if x.completed_games is not None:
+                if x.completed_games<r['completed_games'] or x.completed_games>cfg['pairs']*2:raise HTTPException(400,'对局进度不得倒退或超过本次赛制')
+                c.execute('UPDATE arena_entries SET completed_games=? WHERE id=?',(x.completed_games,eid))
+            if x.phase is not None:
+                if r['phase']=='playing' and x.phase=='validating':raise HTTPException(400,'模型检查完成后不能退回检查阶段')
+                c.execute('UPDATE arena_entries SET phase=? WHERE id=?',(x.phase,eid))
             c.execute('UPDATE arena_entries SET lease_until=? WHERE id=?',(time.time()+90,eid));c.execute('UPDATE arena_settings SET last_seen=?,ready=1 WHERE id=1',(time.time(),))
         return {'ok':True}
 
@@ -435,5 +450,6 @@ def register(app,env):
                 except (ValueError,KeyError,TypeError,ArithmeticError) as exc:raise HTTPException(400,str(exc))
             elif not x.error.strip():raise HTTPException(400,'未完成评测须说明原因')
             c.execute("UPDATE arena_entries SET state=?,error=?,result=?,lease_hash='',lease_until=0,finished=? WHERE id=?",(x.status,x.error if x.status!='completed' else '',json.dumps(report) if report else None,time.time(),eid))
+            if x.status=='completed':c.execute("UPDATE arena_entries SET completed_games=?,phase='finished' WHERE id=?",(len(x.games),eid))
             audit(c,None,'worker-result',json.dumps({'entry':eid,'state':x.status,'fingerprint':x.fingerprint}))
         return {'ok':True}

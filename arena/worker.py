@@ -133,7 +133,7 @@ class Worker:
         if digest.hexdigest()!=expected:raise ValueError('文件校验值不一致')
     def execute(self,job,image):
         cancelled=threading.Event();done=threading.Event();budget=threading.Event();names=set();names_lock=threading.Lock()
-        until=time.monotonic()+job['config']['job_seconds']
+        until=time.monotonic()+job['config']['job_seconds'];progress={'completed_games':0,'phase':'validating'}
         def terminate():
             with names_lock:active=list(names)
             for name in active:remove_container(name)
@@ -141,7 +141,7 @@ class Worker:
             failures=0
             while not done.wait(10):
                 if time.monotonic()>until:budget.set();terminate();return
-                try:self.request(f"jobs/{job['id']}/heartbeat",{'lease':job['lease']},timeout=8);failures=0
+                try:self.request(f"jobs/{job['id']}/heartbeat",{'lease':job['lease'],**progress},timeout=8);failures=0
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in (401,403,409):cancelled.set();terminate();return
                     failures+=1
@@ -173,6 +173,7 @@ class Worker:
                 except (ValueError,TimeoutError) as exc:
                     message=str(exc)[:220] if isinstance(exc,ValueError) and str(exc).startswith('模型校验失败：') else '模型加载/预热超时、中断或超出资源上限，请检查导出接口'
                     return {'status':'rejected','error':message,'games':[]}
+                progress['phase']='playing'
                 games=[]
                 for n,opening in enumerate(job['openings']):
                     for color in (1,-1):
@@ -180,6 +181,7 @@ class Worker:
                         try:
                             baseline=agent('baseline');student=agent('student')
                             games.append(play_game(opening,color,student,baseline,job['config'],n*2+(0 if color==1 else 1)))
+                            progress['completed_games']=len(games)
                         finally:
                             for model in (student,baseline):
                                 if model:

@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import io
 import json
 import sqlite3
@@ -213,3 +214,67 @@ def test_worker_payload_is_bounded_before_json_parsing(setup):
     t,s,other,w=setup
     assert w.post('/api/arena/worker/claim',content=b'x'*2_000_001,headers={'Content-Type':'application/json'}).status_code==413
     assert w.post('/api/arena/worker/claim',content=b'x',headers={'Content-Type':'application/octet-stream'}).status_code==415
+
+
+def test_progress_is_monotonic_and_never_counts_as_a_score(setup):
+    t,s,other,w=setup;cid=competition(t);eid=submit(s,cid).json()['id'];job=claim(w)
+    row=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries'][0]
+    assert row['phase']=='validating' and row['completed_games']==0 and row['total_games']==2
+    endpoint=f'/api/arena/worker/jobs/{eid}/heartbeat'
+    assert w.post(endpoint,json={'lease':job['lease'],'phase':'playing','completed_games':1}).status_code==200
+    row=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries'][0]
+    assert row['phase']=='playing' and row['completed_games']==1 and row['result'] is None
+    assert not s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']
+    assert w.post(endpoint,json={'lease':job['lease'],'completed_games':0}).status_code==400
+    assert w.post(endpoint,json={'lease':job['lease'],'completed_games':3}).status_code==400
+    assert w.post(endpoint,json={'lease':job['lease'],'phase':'validating'}).status_code==400
+    finish(w,job)
+    row=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries'][0]
+    assert row['phase']=='finished' and row['completed_games']==2 and row['result']['score']==0
+
+
+@pytest.mark.skipif(importlib.util.find_spec('onnxruntime') is None,reason='真实教师模型联调需要独立评测机推理依赖')
+def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatch):
+    import hashlib
+    import httpx
+    from arena.runner import ModelClient
+    from arena.worker import Worker
+    t,s,other,registered_worker=setup
+    cid=competition(t,move_ms=5000,job_seconds=120)
+    baseline=Path(a.ROOT)/'course_assets/gomoku/gomoku_uint8_qop_u8u8.onnx'
+    expected_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
+    response=s.post(f'/api/arena/competitions/{cid}/entries',data={'alias':'真实基准自测'},files={'model':('baseline-copy.onnx',baseline.read_bytes())})
+    assert response.status_code==200;eid=response.json()['id']
+    # Only the sandbox boundary is substituted, and only the known bundled teacher bytes may load.
+    # This verifies HTTP leases, artifact transfer, inference, game records, result admission and ranking;
+    # it deliberately does NOT claim to validate Docker/gVisor isolation.
+    class TrustedBaselineAdapter:
+        def __init__(self,image,folder,name,memory_mb):
+            assert hashlib.sha256((folder/'model.onnx').read_bytes()).hexdigest()==expected_hash
+            assert memory_mb==512;self.name=name;self.native=ModelClient(folder/'model.onnx')
+        def predict(self,board,deadline):return self.native.predict(board,deadline)
+        def close(self):self.native.close()
+    monkeypatch.setattr('arena.worker.DockerAgent',TrustedBaselineAdapter)
+    monkeypatch.setattr('arena.worker.remove_container',lambda name:None)
+    monkeypatch.setattr('arena.worker.runtime_info',lambda image:('trusted-fixture-image','c'*64))
+    outgoing=[]
+    def bridge(request):
+        assert request.headers['Authorization']==registered_worker.headers['Authorization']
+        assert 'cookie' not in request.headers
+        outgoing.append((request.method,request.url.path))
+        response=registered_worker.request(request.method,request.url.path,content=request.content,headers=dict(request.headers))
+        return httpx.Response(response.status_code,content=response.content,headers=response.headers)
+    evaluator=Worker('https://course.example','fixture-token','arena-node-1','fixture-image');evaluator.client.close()
+    evaluator.client=httpx.Client(base_url='https://course.example',headers={'Authorization':registered_worker.headers['Authorization'],'X-App-Request':'1'},transport=httpx.MockTransport(bridge),trust_env=False)
+    try:assert evaluator.tick() is True
+    finally:evaluator.client.close()
+    records=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries']
+    assert records[0]['state']=='completed' and records[0]['model_hash']==expected_hash
+    assert records[0]['result']['games']==2 and records[0]['result']['score']==50
+    board=s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']
+    assert board[0]['entry_id']==eid and board[0]['score']==50 and board[0]['rank']==1
+    games=s.get(f'/api/arena/entries/{eid}/replay').json()['games']
+    assert len(games)==2 and {g['student_color'] for g in games}=={-1,1}
+    assert sum(path.endswith('/files/model') for method,path in outgoing)==1
+    assert sum(path.endswith('/files/baseline') for method,path in outgoing)==1
+    assert any(path.endswith('/result') for method,path in outgoing)
