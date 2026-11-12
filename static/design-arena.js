@@ -30,7 +30,7 @@ function arenaWorker(){
  modal('配置独立评测机',`<form id="arena-worker-form"><p>网站只保存文件和成绩，不在网站进程中加载学生模型。请在独立评测机安装Docker与gVisor，构建仓库中的arena镜像。</p><label>评测机标识<input name="worker_id" required pattern="[A-Za-z0-9_-]{3,60}" value="course-arena-1"></label><p class="note">生成新凭证会中断当前租约；旧凭证立即失效。凭证只配置在教师控制的评测机，不提供给学生。</p><button class="primary">生成专用连接凭证</button></form>`);
  $('#arena-worker-form').onsubmit=busy(async e=>{const r=await api('/arena/admin/worker','POST',Object.fromEntries(new FormData(e.target)));modal('保存评测机配置',`<p>该凭证仅显示本次。将配置保存在评测机的私有JSON文件中，并执行chmod 600；关闭后清除页面中的凭证。</p><textarea id="arena-worker-secret" readonly rows="7" autocomplete="off">${esc(JSON.stringify({url:location.origin,worker_id:r.worker_id,token:r.token,image:'writing-course-arena:v1'},null,2))}</textarea><p class="small muted">在独立评测机运行：python arena/worker.py --config /私有路径/arena-worker.json</p><button id="arena-copy-secret">复制配置</button>`);$('#arena-copy-secret').onclick=busy(async()=>{await navigator.clipboard.writeText($('#arena-worker-secret').value);toast('已复制，请只保存到教师控制的评测机')})});
 }
-$('#modal').addEventListener('close',()=>{const secret=document.getElementById?.('arena-worker-secret');if(secret)secret.value=''});
+$('#modal').addEventListener('close',()=>{const secret=document.getElementById?.('arena-worker-secret');if(secret){secret.value='';secret.textContent='';$('#modalBody').textContent=''}});
 async function arenaReplay(eid){
  const actor=user,origin=page;const d=await api('/arena/entries/'+eid+'/replay');if(user!==actor||page!==origin)return;
  let gameIndex=0,step=0;

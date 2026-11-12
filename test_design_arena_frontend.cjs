@@ -25,5 +25,6 @@ vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competition
  vm.runInContext("user={id:1,role:'teacher'};api=async p=>p==='/arena/competitions'?{competitions:[competition]}:p.endsWith('entries')?data:{sealed:true,rows:[]}",ctx);
  view=await vm.runInContext('views.arena()',ctx);assert(view.html.includes('配置独立评测机')&&view.html.includes('成绩尚未开放'));
  vm.runInContext('arenaCreate()',ctx);assert(node('#modalBody').innerHTML.includes('发布后冻结')&&node('#modalBody').innerHTML.includes('结课赛'));
+ const secret={value:'temporary-worker-key',textContent:'temporary-worker-key'};ctx.document.getElementById=id=>id==='arena-worker-secret'?secret:null;node('#modalBody').textContent='temporary-worker-key';node('#modal').listeners.close();assert(secret.value===''&&secret.textContent===''&&node('#modalBody').textContent==='','Closing configuration must clear credentials from the DOM');
  console.log('Model arena: upload bounds, safe rendering, worker readiness, private roles, replay stepping and late-response privacy passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
