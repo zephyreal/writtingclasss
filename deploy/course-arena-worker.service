@@ -1,0 +1,25 @@
+[Unit]
+Description=Independent Gomoku Model Competition Arbiter
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+User=arena-evaluator
+Group=arena-evaluator
+SupplementaryGroups=docker
+WorkingDirectory=/opt/course-arena
+Environment=ARENA_WORK_DIR=/var/lib/course-arena
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/course-arena/.venv/bin/python arena/worker.py --config /etc/course-arena/worker.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/course-arena
+
+[Install]
+WantedBy=multi-user.target

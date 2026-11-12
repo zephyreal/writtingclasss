@@ -14,6 +14,7 @@ from paper_queue import ReviewQueue, BUSY, BJT, next_daily, peak, DeferReview, D
 import writing_workflow
 import adaptive_practice
 import course_access
+import design_arena
 import writing_studio
 import writing_scores
 
@@ -87,6 +88,7 @@ def init():
         writing_workflow.migrate(c)
         writing_scores.migrate(c)
         writing_studio.migrate(c)
+        design_arena.migrate(c)
         adaptive_practice.migrate(c)
         columns={row['name'] for row in c.execute('PRAGMA table_info(submissions)')}
         if 'returned' not in columns:c.execute('ALTER TABLE submissions ADD COLUMN returned INTEGER NOT NULL DEFAULT 0')
@@ -304,7 +306,7 @@ async def save_upload(file,extensions,limit):
         with path.open('wb') as f:
             while chunk:=await file.read(65536):
                 size+=len(chunk)
-                if size>limit:raise HTTPException(413,'文件不能超过3 MB' if limit==LIMIT else f'文件不能超过 {limit//1024//1024} MiB')
+                if size>limit:raise HTTPException(413,'文件不能超过3 MB' if limit==LIMIT else (f'文件不能超过{limit//1_000_000} MB' if limit%1_000_000==0 else f'文件不能超过 {limit//1024//1024} MiB'))
                 f.write(chunk)
         if not size:raise HTTPException(400,'不能上传空文件')
         if ext=='.pdf' and not path.read_bytes()[:5]==b'%PDF-':raise HTTPException(400,'不是有效PDF文件')
@@ -923,6 +925,7 @@ adaptive_practice.register(app,globals())
 course_access.register(app,globals())
 writing_scores.register(app,globals())
 writing_studio.register(app,globals())
+design_arena.register(app,globals())
 
 import english_course
 english_course.register(app,db,current,teacher,lambda *args: ai_call(*args),ai_settings,throttle,DATA)

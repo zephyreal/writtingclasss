@@ -50,6 +50,8 @@ def redeem(c,uid,code,stamp):
     return invite['course_id']
 
 def gated_course(path):
+    if path.startswith('/api/arena/worker/'):return None  # Dedicated scoped bearer credentials, never browser sessions.
+    if path=='/api/arena' or path.startswith('/api/arena/'):return 'design'
     if path.startswith('/api/english'):return 'english'
     if path.startswith('/courses/design/'):return 'design'
     if any(path==p or path.startswith(p+'/') for p in ('/api/chapters','/api/materials','/api/progress','/api/practice','/api/profile','/api/assignments','/api/submissions','/api/writing')):return 'writing'
@@ -124,6 +126,8 @@ def register(app,env):
             c.execute("UPDATE english_assessments SET status='cancelled',error='学生账号已删除' WHERE status='queued' AND session_id IN (SELECT id FROM english_sessions WHERE user_id=?)",(uid,))
             c.execute('DELETE FROM writing_briefings WHERE assignment_id IN (SELECT assignment_id FROM writing_rounds WHERE user_id=?)',(uid,))
             c.execute('UPDATE writing_rounds SET shared=0 WHERE user_id=?',(uid,))
+            c.execute('UPDATE arena_entries SET share_replay=0 WHERE user_id=?',(uid,))
+            c.execute("UPDATE arena_entries SET state='cancelled',error='学生账号已删除',lease_hash='',lease_until=0 WHERE user_id=? AND state IN ('waiting','pending','running')",(uid,))
             c.execute('DELETE FROM sessions WHERE user_id=?',(uid,));c.execute('DELETE FROM practice_pending WHERE user_id=?',(uid,))
             c.execute("UPDATE users SET archived_student_no=student_no,student_no=?,deleted_at=? WHERE id=?",('deleted-'+str(uid)+'-'+secrets.token_hex(6),env['now'](),uid))
             c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'student-delete',json.dumps({'student':uid,'student_no':x.student_no,'reason':x.reason.strip()},ensure_ascii=False),env['now']()))

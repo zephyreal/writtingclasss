@@ -1,0 +1,8 @@
+.git
+.venv
+data
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*worker.json
+**/*worker-config.json

@@ -1,0 +1,215 @@
+import copy
+import io
+import json
+import sqlite3
+import time
+import zipfile
+from pathlib import Path
+import pytest
+from test_app import a,student,teacher,client,H
+from arena_engine import five,position,openings,verify_games,choose
+
+@pytest.fixture
+def setup(tmp_path,monkeypatch):
+    with sqlite3.connect(a.DB) as source,sqlite3.connect(tmp_path/'arena.db') as dest:source.backup(dest)
+    monkeypatch.setattr(a,'DB',tmp_path/'arena.db');a.init()
+    t=teacher();s=student('arena-student');other=student('arena-other')
+    worker=client();r=t.post('/api/arena/admin/worker',json={'worker_id':'arena-node-1'});assert r.status_code==200
+    worker.headers['Authorization']='Bearer '+r.json()['token']
+    return t,s,other,worker
+
+
+def competition(t,**changes):
+    body={'title':'模型比赛','pairs':1,'simulations':2,'daily_limit':5};body.update(changes)
+    r=t.post('/api/arena/admin/competitions',json=body);assert r.status_code==200,r.text
+    return r.json()['id']
+
+
+def submit(s,cid,**changes):
+    body={'alias':'学生 <script>','note':'首次参赛','share_replay':'false'};body.update(changes)
+    return s.post(f'/api/arena/competitions/{cid}/entries',data=body,files={'model':('my.onnx',b'opaque-not-parsed-by-web')})
+
+
+def claim(w,fingerprint='a'*64):
+    r=w.post('/api/arena/worker/claim',json={'worker_id':'arena-node-1','fingerprint':fingerprint,'ready':True});assert r.status_code==200,r.text
+    return r.json()['job']
+
+
+def forfeits(job):
+    games=[]
+    for n,opening in enumerate(job['openings']):
+        for color in (1,-1):
+            moves=opening[:];times=[]
+            if color==-1:
+                move=next(i for i in range(225) if i not in moves);moves.append(move);times=[1.0]
+            games.append({'index':len(games),'student_color':color,'moves':moves,'times_ms':times,'fault':'student_timeout'})
+    return {'lease':job['lease'],'fingerprint':job['fingerprint'],'status':'completed','games':games,'score':99999}
+
+
+def finish(w,job):
+    r=w.post(f"/api/arena/worker/jobs/{job['id']}/result",json=forfeits(job));assert r.status_code==200,r.text
+
+
+def test_rules_openings_and_deterministic_search():
+    bank=openings('fixed',20);assert bank==openings('fixed',20) and len({tuple(x) for x in bank})==20
+    for seq in bank:assert position(seq)[1]==0 and len(seq)%2==0
+    b=[0]*225
+    for i in range(6):b[30+i]=1
+    assert five(b,35,1)  # Overlines count as a win, exactly as the teaching game.
+    with pytest.raises(ValueError):position([1,1])
+    b=[0]*225
+    for i in range(4):b[30+i]=1
+    move=choose(b,1,lambda board,deadline:(0,[1/225]*225),2,time.monotonic()+2)
+    assert move==34
+    empty=[0]*225;predict=lambda board,deadline:(0,[1/225]*225)
+    assert choose(empty,1,predict,4,time.monotonic()+2)==choose(empty,1,predict,4,time.monotonic()+2)
+
+
+def test_upload_permissions_private_files_and_worker_scope(setup):
+    t,s,other,w=setup;cid=competition(t)
+    with a.db() as c:
+        uid=other.get('/api/me').json()['id'];c.execute("UPDATE course_memberships SET active=0 WHERE user_id=? AND course_id='design'",(uid,))
+    assert other.get('/api/arena/competitions').status_code==403
+    assert submit(other,cid).status_code==403
+    assert s.post('/api/arena/admin/competitions',json={'title':'越权'}).status_code==403
+    r=submit(s,cid);assert r.status_code==200;eid=r.json()['id']
+    assert r.json()['state']=='pending'
+    assert s.get(f'/api/arena/entries/{eid}/files/model').content==b'opaque-not-parsed-by-web'
+    outsider=student('arena-outsider')
+    assert outsider.get(f'/api/arena/entries/{eid}/files/model').status_code==404
+    assert t.get(f'/api/arena/entries/{eid}/files/model').status_code==200
+    assert w.get('/api/teacher/students').status_code==401
+    assert client().post('/api/arena/worker/claim',json={'worker_id':'arena-node-1','fingerprint':'a'*64}).status_code==401
+    status=s.get('/api/arena/competitions').json()
+    assert 'token_hash' not in json.dumps(status) and 'openings' not in json.dumps(status)
+    job=claim(w);assert job['id']==eid
+    assert claim(w) is None
+    assert w.get(f'/api/arena/worker/jobs/{eid}/files/model',headers={'X-Arena-Lease':job['lease']}).content==b'opaque-not-parsed-by-web'
+    assert w.get(f'/api/arena/worker/jobs/{eid}/files/model',headers={'X-Arena-Lease':'wrong'}).status_code==409
+
+
+def test_server_replays_report_and_computes_score(setup):
+    t,s,other,w=setup;cid=competition(t);eid=submit(s,cid).json()['id'];job=claim(w)
+    report=forfeits(job);bad=copy.deepcopy(report);bad['games'][0]['moves']=[0]
+    assert w.post(f'/api/arena/worker/jobs/{eid}/result',json=bad).status_code==400
+    missing=copy.deepcopy(report);missing['games']=missing['games'][:1]
+    assert w.post(f'/api/arena/worker/jobs/{eid}/result',json=missing).status_code==400
+    assert s.post(f'/api/arena/worker/jobs/{eid}/result',json=report).status_code==401
+    finish(w,job)
+    board=s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']
+    assert board[0]['score']==0 and board[0]['losses']==2 and board[0]['rank']==1
+    assert 'student_no' not in board[0]
+    assert s.get(f'/api/arena/entries/{eid}/replay').status_code==200
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==403
+    assert w.post(f'/api/arena/worker/jobs/{eid}/result',json=report).status_code==409
+
+
+def test_latest_versions_ties_and_teacher_disqualification(setup):
+    t,s,other,w=setup;cid=competition(t)
+    one=submit(s,cid,share_replay='true').json()['id'];finish(w,claim(w))
+    assert other.get(f'/api/arena/entries/{one}/replay').status_code==200
+    two=submit(other,cid).json()['id'];finish(w,claim(w))
+    board=s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows'];assert [r['rank'] for r in board]==[1,1]
+    pending=submit(s,cid).json()['id']
+    assert one in {r['entry_id'] for r in s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']}
+    finish(w,claim(w))
+    assert pending in {r['entry_id'] for r in s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']}
+    assert t.post(f'/api/arena/admin/entries/{pending}/exclude',json={'reason':'提交内容需教师核查'}).status_code==200
+    assert [r['entry_id'] for r in s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']]==[two]
+    assert s.post(f'/api/arena/entries/{one}/withdraw').status_code==409
+
+
+def test_final_latest_submission_sealed_until_teacher_publication(setup):
+    t,s,other,w=setup;cid=competition(t,mode='final',deadline='2099-01-01T00:00')
+    old=submit(s,cid).json()['id'];latest=submit(s,cid,share_replay='true').json()['id']
+    assert claim(w) is None
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'published':True}).status_code==409
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'state':'closed'}).status_code==200
+    job=claim(w);assert job['id']==latest;finish(w,job)
+    records=s.get(f'/api/arena/competitions/{cid}/entries').json()['entries']
+    assert records[0]['state']=='completed' and records[0]['result'] is None and records[0]['sealed']
+    assert next(e for e in records if e['id']==old)['state']=='superseded'
+    assert s.get(f'/api/arena/competitions/{cid}/leaderboard').json()=={'sealed':True,'rows':[]}
+    assert s.get(f'/api/arena/entries/{latest}/replay').status_code==403
+    assert t.get(f'/api/arena/entries/{latest}/replay').status_code==200
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'published':True}).status_code==200
+    assert s.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows'][0]['score']==0
+    assert other.get(f'/api/arena/entries/{latest}/replay').status_code==200
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'state':'open'}).status_code==409
+    assert submit(s,cid).status_code==409
+
+
+def test_daily_limits_expired_leases_retry_and_key_rotation(setup):
+    t,s,other,w=setup;cid=competition(t,daily_limit=1)
+    eid=submit(s,cid).json()['id'];assert submit(s,cid).status_code==429
+    job=claim(w)
+    with a.db() as c:c.execute('UPDATE arena_entries SET lease_until=? WHERE id=?',(time.time()-1,eid))
+    assert claim(w) is None
+    assert s.get(f'/api/arena/competitions/{cid}/entries').json()['entries'][0]['state']=='interrupted'
+    assert t.post(f'/api/arena/admin/entries/{eid}/retry',json={'reason':'网络恢复后重试'}).status_code==200
+    newer=claim(w);assert newer['lease']!=job['lease']
+    assert w.post(f'/api/arena/worker/jobs/{eid}/result',json=forfeits(job)).status_code==409
+    assert t.post('/api/arena/admin/worker',json={'worker_id':'arena-node-1'}).status_code==200
+    assert w.post(f'/api/arena/worker/jobs/{eid}/heartbeat',json={'lease':newer['lease']}).status_code==401
+
+
+def test_frozen_environment_and_account_deletion_cancel_jobs(setup):
+    t,s,other,w=setup;cid=competition(t);eid=submit(s,cid,share_replay='true').json()['id'];job=claim(w)
+    finish(w,job)
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==200
+    second=submit(s,cid).json()['id'];assert claim(w,'b'*64) is None
+    assert '环境' in t.get('/api/arena/competitions').json()['worker']['message']
+    job=claim(w);assert job['id']==second
+    uid=s.get('/api/me').json()['id']
+    assert t.request('DELETE',f'/api/teacher/students/{uid}',json={'student_no':'arena-student','reason':'重复注册账号'}).status_code==200
+    assert w.post(f'/api/arena/worker/jobs/{second}/heartbeat',json={'lease':job['lease']}).status_code==409
+    assert other.get(f'/api/arena/competitions/{cid}/leaderboard').json()['rows']==[]
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==403
+    assert t.get(f'/api/arena/entries/{eid}/replay').status_code==200
+
+
+def test_source_zip_is_private_archive_and_path_checks(setup):
+    t,s,other,w=setup;cid=competition(t)
+    def archive(name):
+        b=io.BytesIO()
+        with zipfile.ZipFile(b,'w') as z:z.writestr(name,'print("student code is never run")')
+        return b.getvalue()
+    endpoint=f'/api/arena/competitions/{cid}/entries'
+    bad=s.post(endpoint,data={'alias':'test'},files={'model':('m.onnx',b'model'),'source':('s.zip',archive('../escape.py'))})
+    assert bad.status_code==400
+    good=s.post(endpoint,data={'alias':'test'},files={'model':('m.onnx',b'model'),'source':('s.zip',archive('agent.py'))})
+    assert good.status_code==200;eid=good.json()['id']
+    assert s.get(f'/api/arena/entries/{eid}/files/source').status_code==200
+    assert other.get(f'/api/arena/entries/{eid}/files/source').status_code==404
+    assert t.get(f'/api/arena/entries/{eid}/files/source').status_code==200
+    assert s.post(endpoint,data={'alias':'test'},files={'model':('m.pth',b'pickle')}).status_code==400
+
+
+def test_model_size_boundary_and_original_paper_limit(setup):
+    t,s,other,w=setup;cid=competition(t)
+    assert a.LIMIT==3_000_000
+    r=s.post(f'/api/arena/competitions/{cid}/entries',data={'alias':'边界'},files={'model':('m.onnx',b'x'*20_000_000)})
+    assert r.status_code==200
+    r=s.post(f'/api/arena/competitions/{cid}/entries',data={'alias':'超大'},files={'model':('m.onnx',b'x'*20_000_001)})
+    assert r.status_code==413 and '20 MB' in r.json()['detail']
+
+
+def test_starter_template_and_replay_consent_can_be_revoked(setup):
+    t,s,other,w=setup;cid=competition(t);eid=submit(s,cid).json()['id'];finish(w,claim(w))
+    response=s.get(f'/api/arena/competitions/{cid}/starter');assert response.status_code==200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+        assert 'arena/train_example.py' in z.namelist() and 'teacher-baseline.onnx' in z.namelist()
+        assert 'arena/worker.py' not in z.namelist()
+        settings=json.loads(z.read('competition.json'));assert 'openings' not in settings
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==403
+    assert s.put(f'/api/arena/entries/{eid}/sharing',json={'share_replay':True}).status_code==200
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==200
+    assert s.put(f'/api/arena/entries/{eid}/sharing',json={'share_replay':False}).status_code==200
+    assert other.get(f'/api/arena/entries/{eid}/replay').status_code==403
+    assert other.put(f'/api/arena/entries/{eid}/sharing',json={'share_replay':True}).status_code==404
+
+
+def test_worker_payload_is_bounded_before_json_parsing(setup):
+    t,s,other,w=setup
+    assert w.post('/api/arena/worker/claim',content=b'x'*2_000_001,headers={'Content-Type':'application/json'}).status_code==413
+    assert w.post('/api/arena/worker/claim',content=b'x',headers={'Content-Type':'application/octet-stream'}).status_code==415
