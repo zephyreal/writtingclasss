@@ -1,5 +1,7 @@
 """Authenticated model competition API. Uploaded models are NEVER loaded by this application."""
 import io
+import csv
+import html
 import hashlib
 import hmac
 import json
@@ -90,7 +92,7 @@ def entry_public(r,a,u):
         'error':r['error'],'model_name':r['model_name'],'model_hash':r['model_hash'],'source_name':r['source_name'],
         'completed_games':json.loads(a['config'])['pairs']*2 if r['state'] in ('completed','disqualified') else r['completed_games'],
         'total_games':json.loads(a['config'])['pairs']*2,'phase':r['phase'],
-        'share_replay':bool(r['share_replay']),'created':r['created'],'result':result,'sealed':not visible and r['state']=='completed',
+        'share_replay':bool(r['share_replay']),'created':r['created'],'result':result,'sealed':not visible and r['state'] in ('completed','disqualified'),
         'fingerprint':r['fingerprint'] if u['role']=='teacher' else '', 'user_id':r['user_id'] if u['role']=='teacher' else None}
 
 
@@ -312,7 +314,13 @@ def register(app,env):
                 item=entry_public(r,a,u)
                 if u['role']=='teacher':item.update(name=r['name'],student_no=r['student_no'])
                 result.append(item)
-            return {'competition':public_comp(a,u['role']=='teacher'),'entries':result,'worker':worker_public(c)}
+            quota=None
+            if u['role']=='student':
+                midnight=datetime.now(BJT).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+                used=c.execute('SELECT COUNT(*) FROM arena_entries WHERE competition_id=? AND user_id=? AND created_ts>=?',(cid,u['id'],midnight)).fetchone()[0]
+                limit=json.loads(a['config'])['daily_limit']
+                quota={'used':used,'limit':limit,'remaining':max(0,limit-used),'timezone':'Asia/Shanghai'}
+            return {'competition':public_comp(a,u['role']=='teacher'),'entries':result,'worker':worker_public(c),'quota':quota}
 
     @app.get('/api/arena/competitions/{cid}/leaderboard')
     def leaderboard(cid:int,u=Depends(current)):
@@ -332,6 +340,55 @@ def register(app,env):
                 if previous!=r['score']:rank=n
                 r['rank']=rank;previous=r['score']
             return {'sealed':False,'rows':items}
+
+    @app.get('/api/arena/admin/competitions/{cid}/export')
+    def export_records(cid:int,u=Depends(teacher)):
+        ranking=leaderboard(cid,u);ranks={r['entry_id']:r['rank'] for r in ranking['rows']}
+        with db() as c:
+            maintain(c);a=get_comp(c,cid)
+            rows=c.execute('SELECT e.*,u.name,u.student_no FROM arena_entries e JOIN users u ON u.id=e.user_id WHERE e.competition_id=? ORDER BY e.id DESC',(cid,)).fetchall()
+            audit(c,u['id'],'export-records',cid)
+        output=io.StringIO();writer=csv.writer(output)
+        writer.writerow(['比赛','版本','姓名','学号','参赛昵称','状态','当前排名','比赛分','胜','平','负','对局数','模型SHA256','提交时间','改进说明','异常说明'])
+        def safe(value):
+            value=str(value if value is not None else '')
+            return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n')) else value
+        for r in rows:
+            result=json.loads(r['result']) if r['result'] else {}
+            writer.writerow([safe(x) for x in [a['title'],r['id'],r['name'],r['student_no'],r['alias'],r['state'],ranks.get(r['id'],''),result.get('score',''),result.get('wins',''),result.get('draws',''),result.get('losses',''),result.get('games',''),r['model_hash'],r['created'],r['note'],r['error']]])
+        return StreamingResponse(iter([output.getvalue().encode('utf-8-sig')]),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="arena-{cid}-records.csv"','Cache-Control':'no-store'})
+
+    @app.get('/api/arena/entries/{eid}/report')
+    def report(eid:int,format:Literal['html','json']='html',u=Depends(current)):
+        with db() as c:
+            maintain(c);r=c.execute('SELECT * FROM arena_entries WHERE id=?',(eid,)).fetchone()
+            if not r or (u['role']!='teacher' and r['user_id']!=u['id']):raise HTTPException(404,'参赛记录不存在')
+            a=get_comp(c,r['competition_id'])
+            if not can_results(a,u):raise HTTPException(403,'结课赛报告在教师发布后开放')
+            if r['state'] not in ('completed','disqualified') or not r['result']:raise HTTPException(409,'完整评测结束后才能下载报告')
+            result=json.loads(r['result']);colors=[]
+            for color,label in ((1,'执黑'),(-1,'执白')):
+                games=[g for g in result['replays'] if g['student_color']==color]
+                wins=sum(g['winner']==color for g in games);draws=sum(g['winner']==0 for g in games)
+                colors.append({'label':label,'games':len(games),'wins':wins,'draws':draws,'losses':len(games)-wins-draws,'faults':sum(bool(g.get('fault')) for g in games)})
+            payload={'schema':'arena-report-v1','competition':public_comp(a),'entry':entry_public(r,a,u),'colors':colors,'replays':result['replays'],'engine':ENGINE,'fingerprint':r['fingerprint'],'exported_at':env['now']()}
+            audit(c,u['id'],'download-report',eid)
+        if format=='json':
+            content=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8');media='application/json'
+        else:
+            esc=lambda v:html.escape(str(v if v is not None else ''))
+            rows=''.join('<tr>'+''.join('<td>'+esc(item[key])+'</td>' for key in ('label','games','wins','draws','losses','faults'))+'</tr>' for item in colors)
+            cfg=payload['competition']['config']
+            content=(f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>模型评测报告 #{eid}</title>'
+                '<style>body{max-width:880px;margin:36px auto;padding:0 20px;font:16px/1.7 system-ui;color:#20334b}h1{font-size:26px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d7e0eb;padding:8px;text-align:left}code{overflow-wrap:anywhere}p{white-space:pre-wrap}.note{padding:12px;background:#eef3f9}@media print{body{margin:0}}</style>'
+                f'<h1>{esc(a["title"])} · 版本 #{eid}</h1><p>参赛昵称：{esc(r["alias"])}\n提交时间：{esc(r["created"])}\n记录状态：{esc(r["state"])}</p>'
+                +('<p class="note">本版成绩已撤销，不计入排行榜；本报告仅为历史记录。</p>' if r['state']=='disqualified' else '')
+                +f'<h2>比赛分：{esc(result["score"])} / 100</h2><p>{result["wins"]}胜 / {result["draws"]}平 / {result["losses"]}负，共{result["games"]}局。胜100、平50、负0，取全部对局平均。比赛分不等于课程总评。</p>'
+                f'<table><tr><th>执棋</th><th>局数</th><th>胜</th><th>平</th><th>负</th><th>异常判负局</th></tr>{rows}</table>'
+                f'<h2>评测标准</h2><p>15×15，无禁手，连五及以上获胜。双方相同MCTS搜索预算。\n每步{cfg["simulations"]}次搜索，上限{cfg["move_ms"]}毫秒；整次上限{cfg["job_seconds"]}秒。\n引擎：{esc(ENGINE)}（与网页化神档不同）</p>'
+                f'<p>本版模型 SHA-256：<code>{esc(r["model_hash"])}</code></p><p>教师基准 SHA-256：<code>{esc(a["baseline_hash"])}</code></p><p>评测环境指纹：<code>{esc(r["fingerprint"])}</code></p>'
+                f'<h2>本版改进说明</h2><p>{esc(r["note"] or "未填写")}</p><p class="note">对局数量有限，小分差不代表能力必然领先。异常判负已计入对应负局。完整棋谱可在网页复盘，或下载JSON报告留档。</p><p>导出时间：{esc(payload["exported_at"])}</p></html>').encode('utf-8');media='text/html'
+        return StreamingResponse(iter([content]),media_type=media,headers={'Content-Disposition':f'attachment; filename="arena-entry-{eid}.{format}"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; sandbox"})
 
     @app.get('/api/arena/entries/{eid}/replay')
     def replay(eid:int,u=Depends(current)):

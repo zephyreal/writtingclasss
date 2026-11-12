@@ -278,3 +278,59 @@ def test_real_baseline_upload_worker_http_and_ranking_roundtrip(setup,monkeypatc
     assert sum(path.endswith('/files/model') for method,path in outgoing)==1
     assert sum(path.endswith('/files/baseline') for method,path in outgoing)==1
     assert any(path.endswith('/result') for method,path in outgoing)
+
+
+def test_reports_private_escaped_and_replay_totals(setup):
+    t,s,other,w=setup;cid=competition(t,title='比赛 <script>')
+    eid=submit(s,cid,note='<img src=x onerror=alert(1)>',share_replay='true').json()['id']
+    url=f'/api/arena/entries/{eid}/report'
+    assert s.get(url).status_code==409
+    finish(w,claim(w))
+    report=s.get(url)
+    assert report.status_code==200 and 'attachment;' in report.headers['content-disposition']
+    assert report.headers['cache-control']=='no-store' and 'sandbox' in report.headers['content-security-policy']
+    assert '&lt;script&gt;' in report.text and '<script>' not in report.text and '<img ' not in report.text
+    payload=s.get(url+'?format=json').json()
+    assert payload['schema']=='arena-report-v1' and payload['entry']['result']['score']==0
+    assert sum(c['games'] for c in payload['colors'])==2 and sum(c['faults'] for c in payload['colors'])==2
+    assert len(payload['replays'])==2 and len(payload['entry']['model_hash'])==64
+    assert other.get(url).status_code==404  # Shared replay consent does not share private reports or notes.
+    assert other.get(url+'?format=json').status_code==404
+    assert t.get(url).status_code==200
+    assert t.post(f'/api/arena/admin/entries/{eid}/exclude',json={'reason':'教师撤销示例'}).status_code==200
+    assert '成绩已撤销' in s.get(url).text
+
+
+def test_sealed_reports_and_teacher_csv_export(setup):
+    import csv
+    t,s,other,w=setup;cid=competition(t,mode='final',deadline='2099-01-01T00:00')
+    eid=submit(s,cid,alias='=HYPERLINK("x")',note=' \t+danger').json()['id']
+    t.put(f'/api/arena/admin/competitions/{cid}',json={'state':'closed'})
+    finish(w,claim(w));url=f'/api/arena/entries/{eid}/report'
+    assert s.get(url).status_code==403 and s.get(url+'?format=json').status_code==403
+    assert t.get(url).status_code==200
+    export=f'/api/arena/admin/competitions/{cid}/export'
+    assert s.get(export).status_code==403
+    response=t.get(export);assert response.status_code==200 and response.content.startswith(b'\xef\xbb\xbf')
+    rows=list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+    assert rows[1][4].startswith("'=HYPERLINK") and rows[1][14].startswith("'+danger")
+    assert rows[1][6:8]==['1','0.0'] or rows[1][6:8]==['1','0']
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'published':True}).status_code==200
+    assert s.get(url).status_code==200
+    assert t.put(f'/api/arena/admin/competitions/{cid}',json={'published':False}).status_code==200
+    assert s.get(url).status_code==403
+
+
+def test_quota_counts_saved_versions_not_withdrawals_or_other_students(setup):
+    t,s,other,w=setup;cid=competition(t,daily_limit=2)
+    endpoint=f'/api/arena/competitions/{cid}/entries'
+    assert s.get(endpoint).json()['quota']=={'used':0,'limit':2,'remaining':2,'timezone':'Asia/Shanghai'}
+    eid=submit(s,cid).json()['id'];submit(other,cid)
+    assert s.post(f'/api/arena/entries/{eid}/withdraw').status_code==200
+    assert s.get(endpoint).json()['quota']['remaining']==1
+    submit(s,cid);assert s.get(endpoint).json()['quota']['remaining']==0
+    assert submit(s,cid).status_code==429
+    assert t.get(endpoint).json()['quota'] is None
+    with a.db() as c:
+        c.execute('UPDATE arena_entries SET created_ts=? WHERE competition_id=?',(time.time()-86400*2,cid))
+    assert s.get(endpoint).json()['quota']['remaining']==2

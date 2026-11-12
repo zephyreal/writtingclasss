@@ -40,5 +40,17 @@ vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competition
  form.listeners.reset();await scheduled();assert(vm.runInContext('refreshCount',ctx)===1);vm.runInContext('arenaStopPolling()',ctx);assert(vm.runInContext('pollSignal.aborted',ctx));
  let resolve401;ctx.fetch=()=>new Promise(r=>resolve401=r);vm.runInContext("user={id:3,role:'student'};oldRequest=baseApi('/me').catch(()=>null)",ctx);
  vm.runInContext("user={id:4,role:'student'}",ctx);resolve401({ok:false,status:401,json:async()=>({detail:'请重新登录'})});await ctx.oldRequest;assert(vm.runInContext('user.id',ctx)===4,'旧会话的迟到401不可退出新账号');
+ ctx.data={competition:ctx.competition,entries:[{...ctx.running,alias:'\"<img src=x>',state:'completed',result:{score:50,wins:20,draws:0,losses:20}}],worker:{online:true,message:'在线'},quota:{used:2,limit:2,remaining:0}};
+ vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competitions'?{competitions:[competition]}:p.endsWith('entries')?data:{sealed:false,rows:[]}",ctx);
+ view=await vm.runInContext('views.arena()',ctx);
+ assert(view.html.includes('还可提交 0 次')&&view.html.includes('type="submit" disabled'));
+ assert(view.html.includes('下载评测报告')&&view.html.includes('/report?format=json')&&!view.html.includes('<img src=x>'));
+ assert(!view.html.includes('导出比赛记录 CSV')&&!view.html.includes('arena-queue-filter'));
+ ctx.data.entries[0].sealed=true;ctx.data.entries[0].result=null;view=await vm.runInContext('views.arena()',ctx);assert(!view.html.includes('下载评测报告'));
+ vm.runInContext("user={id:1,role:'teacher'}",ctx);view=await vm.runInContext('views.arena()',ctx);assert(view.html.includes('导出比赛记录 CSV')&&view.html.includes('需处理：异常 / 不合格'));
+ const queue=['failed','pending','running','completed','rejected'].map(state=>({dataset:{arenaState:state},hidden:false}));groups.set('[data-arena-state]',queue);
+ vm.runInContext("arenaQueueFilter='attention';arenaApplyFilter()",ctx);assert.deepStrictEqual(queue.map(r=>r.hidden),[false,true,true,true,false]);assert(node('#arena-filter-count').textContent==='显示 2 / 5 个版本');
+ vm.runInContext("arenaQueueFilter='queued';arenaApplyFilter()",ctx);assert.deepStrictEqual(queue.map(r=>r.hidden),[true,false,true,true,true]);
+ vm.runInContext("arenaQueueFilter='all';arenaApplyFilter();arenaStopPolling()",ctx);assert(queue.every(r=>!r.hidden));
  console.log('Model arena: upload bounds, safe rendering, worker readiness, private roles, replay stepping and late-response privacy passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
