@@ -366,3 +366,25 @@ def test_deity_is_frozen_and_old_workers_cannot_claim_it(setup):
     assert '严格VCF' in s.get(f'/api/arena/entries/{eid}/report').text
     t.put(f'/api/arena/admin/competitions/{cid}',json={'opponent':'shared','engine':ENGINE})
     assert s.get(f'/api/arena/competitions/{cid}/entries').json()['competition']['config']==cfg
+
+def test_shared_compute_slot_blocks_gomoku(setup):
+    t,s,other,w=setup;cid=competition(t);submit(s,cid)
+    with a.db() as c:
+        c.execute('CREATE TABLE vehicle_entries(state TEXT,lease_until REAL)')
+        c.execute('INSERT INTO vehicle_entries VALUES(?,?)',('running',time.time()+90))
+    assert claim(w) is None
+    with a.db() as c:c.execute('UPDATE vehicle_entries SET lease_until=0')
+    assert claim(w) is not None
+
+def test_local_starter_trains_in_extracted_directory(setup,tmp_path):
+    import subprocess,sys,os
+    t,s,other,w=setup;cid=competition(t)
+    response=s.get(f'/api/arena/competitions/{cid}/starter')
+    target=tmp_path/'student';target.mkdir()
+    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+        assert {'01_setup.bat','02_train.bat','03_check.bat','arena/student_workflow.py'}<=set(z.namelist())
+        z.extractall(target)
+    (target/'arena/training_config.json').write_text('{"samples":16,"epochs":1,"seed":42}')
+    run=subprocess.run([sys.executable,'-m','arena.student_workflow'],cwd=target,capture_output=True,text=True,timeout=60,env={**os.environ,'OPENBLAS_NUM_THREADS':'1'})
+    assert run.returncode==0,run.stdout+run.stderr
+    assert (target/'output/my_model.onnx').is_file()

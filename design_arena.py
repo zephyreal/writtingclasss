@@ -259,10 +259,12 @@ def register(app,env):
         if a['state']=='draft' and u['role']!='teacher':raise HTTPException(404,'比赛尚未发布')
         output=io.BytesIO();root=Path(env['ROOT'])
         with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as z:
-            for name in ('arena_engine.py','arena/runner.py','arena/example_model.py','arena/train_example.py','arena/local_check.py','arena/requirements.txt','arena/STUDENT.md'):
+            for name in ('arena_engine.py','arena/runner.py','arena/example_model.py','arena/train_example.py','arena/local_check.py','arena/requirements.txt','arena/STUDENT.md','arena/student_workflow.py','arena/training_config.json'):
                 path=root/name
                 if not path.is_file():raise HTTPException(503,'入门模板未安装，请完成本次网站升级')
                 z.writestr(name,path.read_bytes())
+            for name in ('01_setup.bat','02_train.bat','03_check.bat'):
+                z.writestr(name,(root/'arena'/name).read_bytes())
             z.writestr('arena/__init__.py','')
             z.writestr('README.md',(root/'arena/STUDENT.md').read_bytes())
             z.writestr('teacher-baseline.onnx',Path(a['baseline_path']).read_bytes())
@@ -270,8 +272,9 @@ def register(app,env):
         return StreamingResponse(iter([output.getvalue()]),media_type='application/zip',headers={'Content-Disposition':'attachment; filename="gomoku-model-starter.zip"'})
 
     @app.post('/api/arena/competitions/{cid}/entries')
-    async def submit(cid:int,model:UploadFile=File(...),alias:str=Form(...),note:str=Form(''),share_replay:bool=Form(False),source:UploadFile|None=File(None),u=Depends(current)):
+    async def submit(cid:int,model:UploadFile=File(...),alias:str=Form(''),note:str=Form(''),share_replay:bool=Form(False),source:UploadFile|None=File(None),u=Depends(current)):
         if u['role']!='student':raise HTTPException(403,'请使用学生账号参赛')
+        alias=alias.strip() or ('同学'+str(u['id']))
         if not 1<=len(alias.strip())<=30 or len(note)>2000:raise HTTPException(400,'请填写1—30字参赛昵称，改进说明不超过2000字')
         env['throttle']('arena-upload:'+str(u['id']),12,3600)
         def check(c):
@@ -467,8 +470,10 @@ def register(app,env):
             c.execute('BEGIN IMMEDIATE');maintain(c);settings=c.execute('SELECT * FROM arena_settings WHERE id=1').fetchone()
             if x.worker_id!=settings['worker_id'] or not x.ready:raise HTTPException(403,'评测机尚未就绪或标识不匹配')
             c.execute("UPDATE arena_settings SET last_seen=?,ready=1,last_error='' WHERE id=1",(time.time(),))
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vehicle_entries'").fetchone():
+                if c.execute("SELECT 1 FROM vehicle_entries WHERE state='running' AND lease_until>?",(time.time(),)).fetchone():return {'job':None}
             if c.execute("SELECT 1 FROM arena_entries WHERE state='running'").fetchone():return {'job':None}
-            rows=c.execute("SELECT e.* FROM arena_entries e JOIN arena_competitions a ON a.id=e.competition_id WHERE e.state='pending' AND (a.mode='practice' OR a.state='closed') ORDER BY e.id").fetchall()
+            rows=c.execute("SELECT e.* FROM arena_entries e JOIN arena_competitions a ON a.id=e.competition_id WHERE e.state='pending' AND (a.mode='practice' OR a.state='closed') ORDER BY COALESCE((SELECT MAX(h.started) FROM arena_entries h WHERE h.user_id=e.user_id),0), e.id").fetchall()
             r=None;a=None
             for candidate in rows:
                 comp=get_comp(c,candidate['competition_id'])

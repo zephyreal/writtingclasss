@@ -1,3 +1,33 @@
+# 从本地训练到上传：第一次使用
+
+网站只需“下载案例包、上传模型、等待结果”。本地练习不限次数。
+
+1. 安装Python 3.12（64位），勾选 Add Python to PATH。将案例ZIP全部解压，不在压缩包里运行。
+2. 双击01_setup.bat，首次联网安装依赖。失败时先解决错误，不要继续。
+3. 双击02_train.bat，默认用CPU训练一个小模型。出现“检查通过”后，在output文件夹得到 **my_model.onnx**。
+4. 回到网站上传 **output/my_model.onnx**，填写一句本次修改说明。不要上传.py、.pth或整个文件夹。
+5. 上传成功可关闭网页。之后在“我的版本”查看成绩、棋谱和报告。结课赛由教师统一发布。
+6. 用文本编辑器修改arena/training_config.json中的samples（样本数）、epochs（训练轮数），一次只改一项，重新训练后提交比较。
+
+也可在终端运行：python -m arena.student_workflow；只检查已有模型：python -m arena.student_workflow --check。
+Linux/macOS：python3 -m venv .venv；.venv/bin/python -m pip install -r arena/requirements.txt；.venv/bin/python -m arena.student_workflow。
+
+## 三个小实验
+A：原样运行一次，理解输入棋盘、输出落子建议和局面价值。
+B：保持epochs不变，将samples从256改为512，比较执黑/执白胜负。数据更多不保证棋力提高。
+C：比较不同训练设置，记录“我改了什么—预期怎样—实际怎样”；进一步修改train_example.py的数据或网络。
+这是模仿学习入门案例，使用教师标签，需要如实说明。示例提交用于熟悉流程，不能代替自己的课程设计。
+
+## 遇到问题
+- 找不到Python：安装Python 3.12并添加PATH；不是直接双击.py文件。
+- 缺少onnx/numpy：重新运行01_setup.bat，检查依赖下载是否成功。
+- 找不到my_model.onnx：02_train.bat没有完成，先看窗口错误。
+- 训练慢：先用默认256个样本、5轮，不要立即增加到很大。
+- 文件不合格：双击03_check.bat检查自己生成的模型；正式运行仍由服务器隔离检查。
+- 评测机离线：文件已保存，无需反复上传，等待教师处理。
+
+以下为进阶接口及规则，初次使用可稍后阅读。
+
 # 五子棋模型赛：学生入门
 
 本期是模型赛：提交单文件ONNX，教师可选化神挑战赛或统一MCTS练习赛；以页面冻结规则为准。代码ZIP仅用于教师审阅，不会被执行。化神挑战赛复用网页化神搜索代码（一步必赢/必堵、严格VCF、自适应50/100/150次MCTS），学生模型统一150次MCTS；双方每步相同时限。统一MCTS练习赛则双方使用相同固定搜索。
