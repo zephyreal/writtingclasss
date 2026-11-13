@@ -125,7 +125,8 @@ class WorkerInfo(BaseModel):
     ready:bool=True
     error:str=Field(default='',max_length=200)
 class Lease(BaseModel):lease:str=Field(min_length=20,max_length=100)
-class Claim(WorkerInfo):pass
+class Claim(WorkerInfo):
+    function_v1:bool=False
 class Heartbeat(Lease):
     completed_games:StrictInt|None=Field(default=None,ge=0,le=100)
     phase:Literal['validating','playing']|None=None
@@ -169,6 +170,10 @@ class WorkerPayloadLimit:
         await self.app(scope,replay,send)
 
 
+def _finish_zip(z, output):
+    z.close()
+    return output.getvalue()
+
 def register(app,env):
     global ENV
     ENV=env;db=lambda:env['db']();current=env['current'];teacher=env['teacher']
@@ -203,7 +208,7 @@ def register(app,env):
         folder=Path(env['DATA'])/'arena-baselines';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/(secrets.token_hex(16)+'.onnx');shutil.copyfile(source,path)
         try:
-            config={'engine':DEITY_ENGINE if x.opponent=='deity' else ENGINE,'pairs':x.pairs,'simulations':x.simulations,'move_ms':x.move_ms,'job_seconds':x.job_seconds,'daily_limit':x.daily_limit,'memory_mb':1024,'threads':1}
+            config={'submission':'function-v1','engine':DEITY_ENGINE if x.opponent=='deity' else ENGINE,'pairs':x.pairs,'simulations':x.simulations,'move_ms':x.move_ms,'job_seconds':x.job_seconds,'daily_limit':x.daily_limit,'memory_mb':1024,'threads':1}
             if x.opponent=='deity':config['deity_sha']=hashlib.sha256((Path(env['ROOT'])/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()
             bank=openings(secrets.token_hex(24),x.pairs)
             with db() as c:
@@ -259,6 +264,12 @@ def register(app,env):
         if a['state']=='draft' and u['role']!='teacher':raise HTTPException(404,'比赛尚未发布')
         output=io.BytesIO();root=Path(env['ROOT'])
         with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as z:
+            if json.loads(a['config']).get('submission')=='function-v1':
+                for name in ('agent.py','function_agent.py','local_function_test.py','START.bat','FUNCTION.md'):
+                    z.writestr(name,(root/'arena'/name).read_bytes())
+                z.writestr('arena_engine.py',(root/'arena_engine.py').read_bytes())
+                z.writestr('competition.json',json.dumps(public_comp(a),ensure_ascii=False,indent=2))
+                return StreamingResponse(iter([_finish_zip(z,output)]),media_type='application/zip',headers={'Content-Disposition':'attachment; filename=gomoku-function-starter.zip'})
             for name in ('arena_engine.py','arena/runner.py','arena/example_model.py','arena/train_example.py','arena/local_check.py','arena/requirements.txt','arena/STUDENT.md','arena/student_workflow.py','arena/training_config.json'):
                 path=root/name
                 if not path.is_file():raise HTTPException(503,'入门模板未安装，请完成本次网站升级')
@@ -285,8 +296,23 @@ def register(app,env):
             if c.execute('SELECT COUNT(*) FROM arena_entries WHERE competition_id=? AND user_id=? AND created_ts>=?',(cid,u['id'],midnight)).fetchone()[0]>=cfg['daily_limit']:raise HTTPException(429,'今天的参赛提交次数已用完，教师可重试基础设施失败的任务')
             if c.execute("SELECT COUNT(*) FROM arena_entries WHERE state IN ('waiting','pending','running')").fetchone()[0]>=1000:raise HTTPException(429,'评测队列已满，请稍后提交')
             return a
-        with db() as c:check(c)
-        path,name=await env['save_upload'](model,{'.onnx'},MODEL_LIMIT);source_path=source_name=''
+        with db() as c:a=check(c)
+        is_function=json.loads(a['config']).get('submission')=='function-v1'
+        if is_function:
+            if source and source.filename:raise HTTPException(400,'只上传agent.py，不接受工程文件')
+            if (model.filename or '').lower()!='agent.py':raise HTTPException(400,'请上传单个agent.py文件')
+            import ast
+            content=await model.read(900001)
+            if not content or len(content)>900000:raise HTTPException(400,'代码须小于900KB')
+            try:
+                tree=ast.parse(content.decode('utf-8-sig'))
+                functions=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='choose_move']
+                if len(functions)!=1:raise ValueError()
+                args=functions[0].args
+                if len(args.posonlyargs)+len(args.args)!=1 or args.kwonlyargs or args.vararg or args.kwarg:raise ValueError()
+            except (ValueError,SyntaxError,UnicodeError):raise HTTPException(400,'请定义choose_move(board)函数，并检查UTF-8编码和Python语法')
+            await model.seek(0)
+        path,name=await env['save_upload'](model,{'.py'} if is_function else {'.onnx'},900000 if is_function else MODEL_LIMIT);source_path=source_name=''
         try:
             if source and source.filename:
                 source_path,source_name=await env['save_upload'](source,{'.zip'},SOURCE_LIMIT)
@@ -394,7 +420,7 @@ def register(app,env):
                 +('<p class="note">本版成绩已撤销，不计入排行榜；本报告仅为历史记录。</p>' if r['state']=='disqualified' else '')
                 +f'<h2>比赛分：{esc(result["score"])} / 100</h2><p>{result["wins"]}胜 / {result["draws"]}平 / {result["losses"]}负，共{result["games"]}局。胜100、平50、负0，取全部对局平均。比赛分不等于课程总评。</p>'
                 f'<table><tr><th>执棋</th><th>局数</th><th>胜</th><th>平</th><th>负</th><th>异常判负局</th></tr>{rows}</table>'
-                f'<h2>评测标准</h2><p>15×15，无禁手，连五及以上获胜。{esc(rules)}\n学生每步{cfg["simulations"]}次搜索，上限{cfg["move_ms"]}毫秒；整次上限{cfg["job_seconds"]}秒。\n引擎：{esc(cfg["engine"])}</p>'
+                f'<h2>评测标准</h2><p>15×15，无禁手，连五及以上获胜。{esc(rules)}\n学生策略：{"自主落子函数" if cfg.get("submission")=="function-v1" else str(cfg["simulations"])+"次搜索"}，每步上限{cfg["move_ms"]}毫秒；整次上限{cfg["job_seconds"]}秒。\n引擎：{esc(cfg["engine"])}</p>'
                 f'<p>化神代码 SHA-256：<code>{esc(cfg.get("deity_sha","不适用"))}</code></p>'
                 f'<p>本版模型 SHA-256：<code>{esc(r["model_hash"])}</code></p><p>教师基准 SHA-256：<code>{esc(a["baseline_hash"])}</code></p><p>评测环境指纹：<code>{esc(r["fingerprint"])}</code></p>'
                 f'<h2>本版改进说明</h2><p>{esc(r["note"] or "未填写")}</p><p class="note">对局数量有限，小分差不代表能力必然领先。异常判负已计入对应负局。完整棋谱可在网页复盘，或下载JSON报告留档。</p><p>导出时间：{esc(payload["exported_at"])}</p></html>').encode('utf-8');media='text/html'
@@ -478,6 +504,7 @@ def register(app,env):
             for candidate in rows:
                 comp=get_comp(c,candidate['competition_id'])
                 cfg=json.loads(comp['config'])
+                if cfg.get('submission')=='function-v1' and not x.function_v1:continue
                 if cfg['engine'] not in x.engines:continue
                 if cfg['engine']==DEITY_ENGINE and cfg.get('deity_sha')!=x.deity_sha:continue
                 if comp['fingerprint'] and comp['fingerprint']!=x.fingerprint:continue

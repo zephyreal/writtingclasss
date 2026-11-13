@@ -9,8 +9,12 @@ ctx.competition={id:1,title:'班级赛 <script>',instructions:'测试 <x>',mode:
 ctx.data={competition:ctx.competition,entries:[],worker:{online:false,message:'评测机未连接'}};
 vm.runInContext("user={id:3,role:'student'};api=async p=>p==='/arena/competitions'?{competitions:[competition]}:p.endsWith('entries')?data:{sealed:false,rows:[]}",ctx);
 (async()=>{
+ ctx.competition.config.submission='function-v1';
+ let functionView=await vm.runInContext('views.arena()',ctx);
+ assert(functionView.html.includes('choose_move')&&functionView.html.includes('900KB')&&!functionView.html.includes('name="source"'));
+ delete ctx.competition.config.submission;
  let view=await vm.runInContext('views.arena()',ctx);
- assert(view.html.includes('20MB')&&view.html.includes('5MB')&&view.html.includes('只运行ONNX'));
+ assert(view.html.includes('20MB')&&view.html.includes('历史模型比赛'));
  assert(view.html.includes('评测机未就绪')&&view.html.includes('尚无完成全部评测'));
  assert(view.html.includes('&lt;script&gt;')&&!view.html.includes('<script>'));
  assert(!view.html.includes('配置独立评测机'));

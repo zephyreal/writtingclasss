@@ -32,7 +32,7 @@ install -d -o arena-evaluator -g arena-evaluator -m 700 /var/lib/course-arena /e
 if [ "$ARENA_SOURCE_ROOT" != /opt/course-arena ]; then
     cp "$ARENA_SOURCE_ROOT/arena_engine.py" /opt/course-arena/
     cp "$ARENA_SOURCE_ROOT/.dockerignore" /opt/course-arena/
-    for file in Dockerfile requirements.txt requirements-worker.txt runner.py model_service.py deity.py deity_bridge.cjs worker.py smoke.py example_model.py train_example.py local_check.py STUDENT.md; do
+    for file in Dockerfile requirements.txt requirements-worker.txt runner.py model_service.py function_agent.py deity.py deity_bridge.cjs worker.py smoke.py example_model.py train_example.py local_check.py STUDENT.md; do
         cp "$ARENA_SOURCE_ROOT/arena/$file" /opt/course-arena/arena/
     done
     cp "$ARENA_SOURCE_ROOT/course_assets/gomoku/ai-worker.js" /opt/course-arena/course_assets/gomoku/

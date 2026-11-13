@@ -103,9 +103,9 @@ class DockerAgent:
         request_id=secrets.token_hex(12)
         self.process.stdin.write(json.dumps({'request_id':request_id,'op':'choose','board':board},separators=(',',':')).encode()+b'\n');self.process.stdin.flush()
         reply=self.next(deadline)
-        if not isinstance(reply,dict) or reply.get('request_id')!=request_id:raise ValueError('化神响应标识不匹配')
+        if not isinstance(reply,dict) or reply.get('request_id')!=request_id:raise ValueError('落子响应标识不匹配')
         move=reply.get('move')
-        if type(move) is not int or not 0<=move<225 or board[move]:raise ValueError('化神落子无效')
+        if type(move) is not int or not 0<=move<225 or board[move]:raise ValueError('落子无效')
         return move
     def close(self):
         if self.closed:return
@@ -166,8 +166,10 @@ class Worker:
             with tempfile.TemporaryDirectory(prefix='arena-input-',dir=os.getenv('ARENA_WORK_DIR') or None) as tmp:
                 folder=Path(tmp);folders={}
                 for kind in ('student','baseline'):
-                    target=folder/kind;target.mkdir(mode=0o755);self.download(job,'model' if kind=='student' else 'baseline',target/'model.onnx')
-                    os.chmod(target/'model.onnx',0o444);folders[kind]=target
+                    target=folder/kind;target.mkdir(mode=0o755)
+                    filename='agent.py' if kind=='student' and job['config'].get('submission')=='function-v1' else 'model.onnx'
+                    self.download(job,'model' if kind=='student' else 'baseline',target/filename)
+                    os.chmod(target/filename,0o444);folders[kind]=target
                 def agent(kind):
                     if cancelled.is_set():raise RuntimeError('任务已取消')
                     if budget.is_set() or time.monotonic()>until:raise TimeoutError('整场资源预算已用完')
@@ -214,7 +216,7 @@ class Worker:
             done.set();heartbeat.join(timeout=35);terminate()
     def tick(self):
         image,fingerprint=runtime_info(self.image);self.fingerprint=fingerprint;self.ping(True)
-        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True,'engines':list(ENGINES),'deity_sha':hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()})
+        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True,'engines':list(ENGINES),'function_v1':True,'deity_sha':hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()})
         job=reply.get('job')
         if not job:return False
         try:result=self.execute(job,image)

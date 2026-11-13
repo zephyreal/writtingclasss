@@ -20,10 +20,16 @@ def setup(tmp_path,monkeypatch):
     return t,s,other,worker
 
 
-def competition(t,**changes):
+def competition(t,legacy=True,**changes):
     body={'title':'模型比赛','pairs':1,'simulations':2,'daily_limit':5};body.update(changes)
     r=t.post('/api/arena/admin/competitions',json=body);assert r.status_code==200,r.text
-    return r.json()['id']
+    cid=r.json()['id']
+    if legacy:
+        # Existing suites exercise frozen, pre-function model competitions.
+        with a.db() as db:
+            cfg=json.loads(db.execute('SELECT config FROM arena_competitions WHERE id=?',(cid,)).fetchone()[0]);cfg.pop('submission',None)
+            db.execute('UPDATE arena_competitions SET config=? WHERE id=?',(json.dumps(cfg),cid))
+    return cid
 
 
 def submit(s,cid,**changes):

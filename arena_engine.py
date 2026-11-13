@@ -118,7 +118,7 @@ def play_game(opening,student_color,student,baseline,cfg,index):
         color=1 if len(moves)%2==0 else -1;agent=student if color==student_color else baseline
         start=time.monotonic();deadline=start+cfg['move_ms']/1000
         try:
-            if color!=student_color and cfg.get('engine')==DEITY_ENGINE:
+            if (color==student_color and cfg.get('submission')=='function-v1') or (color!=student_color and cfg.get('engine')==DEITY_ENGINE):
                 move=agent.choose([v*color for v in board],deadline)
             else:move=choose(board,color,agent.predict,cfg['simulations'],deadline)
             elapsed=(time.monotonic()-start)*1000
