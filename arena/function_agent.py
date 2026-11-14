@@ -16,7 +16,7 @@ class FunctionAgent:
         try:
             result = self.function(grid)
         except Exception as exc:
-            raise ValueError('choose_move执行出错') from exc
+            raise ValueError('choose_move执行出错：'+type(exc).__name__+'；检查索引、变量名和返回值') from exc
         if not isinstance(result, (tuple, list)) or len(result) != 2:
             raise ValueError('请返回(row, col)')
         row, col = result

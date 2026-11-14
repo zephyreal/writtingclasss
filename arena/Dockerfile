@@ -8,6 +8,7 @@ COPY arena_engine.py ./arena_engine.py
 COPY arena/runner.py ./runner.py
 COPY arena/model_service.py ./model_service.py
 COPY arena/function_agent.py ./function_agent.py
+COPY arena/gomoku_model.py ./gomoku_model.py
 COPY arena/deity.py arena/deity_bridge.cjs ./
 COPY course_assets/gomoku/ai-worker.js ./deity-engine.js
 USER 65534:65534

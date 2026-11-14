@@ -127,6 +127,7 @@ class WorkerInfo(BaseModel):
 class Lease(BaseModel):lease:str=Field(min_length=20,max_length=100)
 class Claim(WorkerInfo):
     function_v1:bool=False
+    model_helper_v1:bool=False
 class Heartbeat(Lease):
     completed_games:StrictInt|None=Field(default=None,ge=0,le=100)
     phase:Literal['validating','playing']|None=None
@@ -265,8 +266,9 @@ def register(app,env):
         output=io.BytesIO();root=Path(env['ROOT'])
         with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as z:
             if json.loads(a['config']).get('submission')=='function-v1':
-                for name in ('agent.py','function_agent.py','local_function_test.py','START.bat','FUNCTION.md'):
+                for name in ('agent.py','function_agent.py','local_function_test.py','START.bat','FUNCTION.md','gomoku_model.py','runner.py','requirements.txt','agent_model_example.py','enable_model.py','ENABLE_MODEL.bat'):
                     z.writestr(name,(root/'arena'/name).read_bytes())
+                z.writestr('teacher-baseline.onnx',Path(a['baseline_path']).read_bytes())
                 z.writestr('arena_engine.py',(root/'arena_engine.py').read_bytes())
                 z.writestr('competition.json',json.dumps(public_comp(a),ensure_ascii=False,indent=2))
                 return StreamingResponse(iter([_finish_zip(z,output)]),media_type='application/zip',headers={'Content-Disposition':'attachment; filename=gomoku-function-starter.zip'})
@@ -504,7 +506,7 @@ def register(app,env):
             for candidate in rows:
                 comp=get_comp(c,candidate['competition_id'])
                 cfg=json.loads(comp['config'])
-                if cfg.get('submission')=='function-v1' and not x.function_v1:continue
+                if cfg.get('submission')=='function-v1' and not (x.function_v1 and x.model_helper_v1):continue
                 if cfg['engine'] not in x.engines:continue
                 if cfg['engine']==DEITY_ENGINE and cfg.get('deity_sha')!=x.deity_sha:continue
                 if comp['fingerprint'] and comp['fingerprint']!=x.fingerprint:continue

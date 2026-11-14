@@ -9,7 +9,12 @@ from arena_engine import five
 
 def main():
     root=Path(__file__).resolve().parent
-    agent=FunctionAgent(root/'agent.py')
+    try:
+        agent=FunctionAgent(root/'agent.py')
+    except ModuleNotFoundError as exc:
+        raise SystemExit('缺少模型依赖：请先运行ENABLE_MODEL.bat；基础示例无需额外依赖。缺少：'+str(exc.name))
+    except Exception as exc:
+        raise SystemExit('agent.py加载失败：'+type(exc).__name__+'：'+str(exc))
     config=json.loads((root/'competition.json').read_text())['config']
     board=[0]*225;records=[];winner=0;error=''
     try:

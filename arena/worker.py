@@ -170,6 +170,10 @@ class Worker:
                     filename='agent.py' if kind=='student' and job['config'].get('submission')=='function-v1' else 'model.onnx'
                     self.download(job,'model' if kind=='student' else 'baseline',target/filename)
                     os.chmod(target/filename,0o444);folders[kind]=target
+                if job['config'].get('submission')=='function-v1':
+                    import shutil
+                    shutil.copyfile(folders['baseline']/'model.onnx',folders['student']/'teacher-baseline.onnx')
+                    os.chmod(folders['student']/'teacher-baseline.onnx',0o444)
                 def agent(kind):
                     if cancelled.is_set():raise RuntimeError('任务已取消')
                     if budget.is_set() or time.monotonic()>until:raise TimeoutError('整场资源预算已用完')
@@ -216,7 +220,7 @@ class Worker:
             done.set();heartbeat.join(timeout=35);terminate()
     def tick(self):
         image,fingerprint=runtime_info(self.image);self.fingerprint=fingerprint;self.ping(True)
-        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True,'engines':list(ENGINES),'function_v1':True,'deity_sha':hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()})
+        reply=self.request('claim',{'worker_id':self.worker_id,'fingerprint':fingerprint,'ready':True,'engines':list(ENGINES),'function_v1':True,'model_helper_v1':True,'deity_sha':hashlib.sha256((Path(__file__).parents[1]/'course_assets/gomoku/ai-worker.js').read_bytes()).hexdigest()})
         job=reply.get('job')
         if not job:return False
         try:result=self.execute(job,image)
