@@ -16,7 +16,7 @@ trap 'systemctl start writing-class || true' EXIT
 backup_paths=(opt/writing-class/app.py opt/writing-class/seed.py opt/writing-class/manage.py opt/writing-class/static opt/writing-class/requirements.txt var/lib/writing-class)
 if [ -f /opt/writing-class/review_pipeline.py ]; then backup_paths+=(opt/writing-class/review_pipeline.py); fi
 if [ -d /opt/writing-class/course_assets ]; then backup_paths+=(opt/writing-class/course_assets); fi
-for optional in arena design_arena.py arena_engine.py writing_studio.py writing_scores.py course_access.py adaptive_practice.py practice_bank.py question_bank writing_workflow.py writing_slides.py paper_queue.py english_course.py english_speech.py vendor; do
+for optional in gp_mpc_racing arena design_arena.py arena_engine.py writing_studio.py writing_scores.py course_access.py adaptive_practice.py practice_bank.py question_bank writing_workflow.py writing_slides.py paper_queue.py english_course.py english_speech.py vendor; do
     if [ -e "/opt/writing-class/$optional" ]; then backup_paths+=("opt/writing-class/$optional"); fi
 done
 tar -czf "$UPDATE_BACKUP" -C / "${backup_paths[@]}"
@@ -32,7 +32,7 @@ cp -r "$UPDATE_SOURCE/static/." /opt/writing-class/static/
 install -d -m 755 /opt/writing-class/course_assets
 cp -r "$UPDATE_SOURCE/course_assets/." /opt/writing-class/course_assets/
 cd /opt/writing-class
-if ! runuser -u writingclass -- env DATA_DIR=/var/lib/writing-class TZ=Asia/Shanghai .venv/bin/python -c 'import app; print("数据库升级完成，已有账号、课件、作业和成绩已保留")'; then
+if ! runuser -u writingclass -- env DATA_DIR=/var/lib/writing-class TZ=Asia/Shanghai .venv/bin/python -c 'import importlib; from pathlib import Path; importlib.import_module("gp_mpc_racing.integrated" if Path("gp_mpc_racing/integrated.py").is_file() else "app"); print("数据库升级完成，已有账号、课件、作业和成绩已保留")'; then
     echo '迁移失败，恢复升级前代码和数据'
     tar -xzf "$UPDATE_BACKUP" -C /
     exit 1
@@ -40,6 +40,21 @@ fi
 systemctl start writing-class
 for attempt in 1 2 3 4 5 6 7 8; do
     if curl -fsS http://127.0.0.1:8000/healthz; then
+        if [ -f /opt/writing-class/gp_mpc_racing/integrated.py ]; then
+            if ! /opt/writing-class/.venv/bin/python - <<'PY_CHECK'
+import urllib.request
+base='http://127.0.0.1:8000'
+with urllib.request.urlopen(base+'/',timeout=5) as r: home=r.read().decode()
+assert '/courses/design/vehicle/entry.js' in home, '无人车导航未加载，请检查vehicle-racing.conf启动配置'
+with urllib.request.urlopen(base+'/courses/design/vehicle/entry.js',timeout=5) as r: script=r.read().decode()
+assert 'views.vehicle' in script, '无人车导航脚本不可用'
+print('无人车导航与登录前脚本检查通过')
+PY_CHECK
+            then
+                echo '无人车模块检查失败，本次升级不能判为成功'
+                break
+            fi
+        fi
         echo; echo '课程平台升级成功，请Ctrl+F5刷新。教师账号和密码不变。'
         echo "升级前备份：$UPDATE_BACKUP"
         trap - EXIT

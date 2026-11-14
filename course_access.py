@@ -50,6 +50,9 @@ def redeem(c,uid,code,stamp):
     return invite['course_id']
 
 def gated_course(path):
+    # Public navigation bootstrap is needed before login; it contains no course data.
+    # Keep this exact: all racing pages, examples and results remain protected.
+    if path=='/courses/design/vehicle/entry.js':return None
     if path.startswith('/api/arena/worker/'):return None  # Dedicated scoped bearer credentials, never browser sessions.
     if path=='/api/arena' or path.startswith('/api/arena/'):return 'design'
     if path.startswith('/api/english'):return 'english'
