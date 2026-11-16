@@ -1,3 +1,4 @@
+from typing import Literal
 import csv, io, json, os, re, secrets, sqlite3, hashlib, hmac, time, zipfile, math
 from pathlib import Path
 from contextlib import contextmanager,asynccontextmanager
@@ -158,6 +159,7 @@ class Register(BaseModel):
     invite_code:str=Field(default='',max_length=100)
     phone:str=Field(min_length=7,max_length=30)
 class Login(BaseModel):
+    role:Literal['student','teacher']|None=None
     student_no:str=Field(min_length=1,max_length=30)
     password:str=Field(min_length=1,max_length=128)
 @app.post('/api/register')
@@ -237,6 +239,7 @@ def login(x:Login,request:Request):
     with db() as c:
         u=c.execute("SELECT * FROM users WHERE student_no=? AND deleted_at=''",(x.student_no,)).fetchone()
         if not u or not pwdcheck(x.password,u['password']):raise HTTPException(401,'账号或密码不正确')
+        if x.role is not None and x.role!=u['role']:raise HTTPException(403,'该账号身份与所选入口不符，请切换学生登录或教师登录')
         token=secrets.token_urlsafe(40)
         c.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
         c.execute('INSERT INTO sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),u['id'],time.time()+43200))

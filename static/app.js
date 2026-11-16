@@ -6,8 +6,25 @@ async function api(path,method='GET',data,signal){const actor=user,options={meth
 function busy(fn){return async function(e){e?.preventDefault();const btn=e?.submitter; if(btn)btn.disabled=true;try{await fn(e)}catch(err){toast(err.message)}finally{if(btn)btn.disabled=false}}}
 function modal(title,html){$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modal').showModal()}
 $('#closeModal').onclick=()=>$('#modal').close();
-$('#authToggle').onclick=()=>{reg=!reg;$('#nameLabel').hidden=!reg;$('#phoneLabel').hidden=!reg;$('#phoneLabel input').required=reg;$('#inviteLabel').hidden=!reg;$('#inviteLabel input').required=reg;$('#nameLabel input').required=reg;$('#registerNote').hidden=!reg;$('#authTitle').textContent=reg?'创建学生账号':'进入学习空间';$('#authDesc').textContent=reg?'填写姓名和学号，建立你的学习档案。':'使用学号登录，继续你的写作进程。';$('#authSubmit').textContent=reg?'注册学生账号 →':'登录学习空间 →';$('#authToggle').textContent=reg?'已有账号？返回登录':'还没有账号？学生注册';$('#loginForm [name=password]').minLength=reg?10:1};
-$('#loginForm').onsubmit=busy(async e=>{const x=Object.fromEntries(new FormData(e.target));if(reg){await api('/register','POST',x);toast('注册成功，请登录');$('#authToggle').click()}else{await api('/login','POST',{student_no:x.student_no,password:x.password});e.target.reset();await boot()}});
+let loginRole='student';
+function renderAuth(){
+ const registering=reg&&loginRole==='student';reg=registering;
+ for(const id of ['nameLabel','phoneLabel','inviteLabel']){const label=$('#'+id);label.hidden=!registering;label.querySelector('input').required=registering}
+ $('#registerNote').hidden=!registering;$('#authToggle').hidden=loginRole==='teacher';
+ $('#authTitle').textContent=registering?'创建学生账号':loginRole==='teacher'?'教师登录':'学生登录';
+ $('#authDesc').textContent=registering?'填写资料与对应课程的邀请码，注册后登录。已有账号可直接登录后加入新课程。':loginRole==='teacher'?'使用教师账号管理课程、学生和竞赛。':'使用学号登录，进入已加入的课程。';
+ $('#authSubmit').textContent=registering?'注册学生账号 →':loginRole==='teacher'?'教师登录 →':'学生登录 →';
+ $('#authToggle').textContent=registering?'已有账号？返回学生登录':'还没有账号？学生注册';
+ $('#accountLabel').textContent=loginRole==='teacher'?'教师账号':'学号';
+ $('#loginForm [name=student_no]').placeholder=loginRole==='teacher'?'请输入教师账号':'请输入学号';
+ $('#loginForm [name=password]').minLength=registering?10:1;
+ $('#studentLogin').setAttribute('aria-pressed',String(loginRole==='student'));
+ $('#teacherLogin').setAttribute('aria-pressed',String(loginRole==='teacher'));
+}
+$('#studentLogin').onclick=()=>{loginRole='student';reg=false;renderAuth()};
+$('#teacherLogin').onclick=()=>{loginRole='teacher';reg=false;renderAuth()};
+$('#authToggle').onclick=()=>{loginRole='student';reg=!reg;renderAuth()};
+$('#loginForm').onsubmit=busy(async e=>{const x=Object.fromEntries(new FormData(e.target));if(reg){await api('/register','POST',x);toast('注册成功，请登录');$('#authToggle').click()}else{await api('/login','POST',{student_no:x.student_no,password:x.password,role:loginRole});e.target.reset();await boot()}});
 $('#logout').onclick=busy(async()=>{if(typeof englishPrepareLogout==='function')await englishPrepareLogout();else if(typeof englishCleanup==='function')englishCleanup();await api('/logout','POST');if(typeof englishForgetRecords==='function')englishForgetRecords();user=null;$('#workspace').hidden=true;$('#auth').hidden=false;$('#loginForm').reset()});
 $('#passwordBtn').onclick=()=>{modal('修改密码',`<form id="passwordForm"><label>原密码<input name="old" type="password" required autocomplete="current-password"></label><label>新密码（至少10位）<input name="new" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label><button class="primary">保存并重新登录</button></form>`);$('#passwordForm').onsubmit=busy(async e=>{if(typeof englishPrepareLogout==='function')await englishPrepareLogout();await api('/password','POST',Object.fromEntries(new FormData(e.target)));if(typeof englishForgetRecords==='function')englishForgetRecords();$('#modal').close();user=null;$('#workspace').hidden=true;$('#auth').hidden=false;toast('密码已修改，请重新登录')})};
 const menu=[['overview','◫','学习概览'],['course','▤','课程课件'],['practice','✎','写作练习'],['assignments','▣','课程作业'],['grades','▥','学习成绩'],['profile','◎','学习档案']];
@@ -21,7 +38,7 @@ function renderNavigation(){
  const writingItems=user.role==='teacher'?[...menu,['writingWorklist','▦','班级交付清单'],['students','♙','学生管理'],['review','✓','作业批改'],['access','♧','注册与额度'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
  const course=COURSES.find(c=>c.id===activeCourse);
  const englishItems=[['english','◉','话题对话'],['englishHistory','▤','记录与成绩'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishReview','✓','口语评价与成绩'],['englishStudents','♙','英语练习档案'],['englishSettings','⚙','实时语音设置']]:[])];
- const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:activeCourse==='design'?[['design','▤','教学试玩'],['arena','♟','五子棋算法竞赛']]:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
+ const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:activeCourse==='design'?[['design','▤','教学试玩'],['arena','♟','五子棋算法竞赛'],...(user.role==='teacher'?[['students','♙','学生管理'],['access','♧','注册与邀请码']]:[])]:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
  $('#nav').innerHTML=items.map(([id,icon,name])=>`<button data-page="${id}">${icon}　${name}</button>`).join('');
  $('#nav').onclick=e=>{const b=e.target.closest('[data-page]');if(b){if(b.dataset.page==='portal')selectCourse(null);else show(b.dataset.page)}};
  $('#courseSelector').value=activeCourse||'';
