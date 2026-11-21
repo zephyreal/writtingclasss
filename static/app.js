@@ -39,6 +39,11 @@ function renderNavigation(){
  const course=COURSES.find(c=>c.id===activeCourse);
  const englishItems=[['english','◉','话题对话'],['englishHistory','▤','记录与成绩'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishReview','✓','口语评价与成绩'],['englishStudents','♙','英语练习档案'],['englishSettings','⚙','实时语音设置']]:[])];
  const items=[['portal','⌂','全部课程'],...(activeCourse==='writing'?writingItems:activeCourse==='english'?englishItems:activeCourse==='design'?[['design','▤','教学试玩'],['arena','♟','五子棋算法竞赛'],...(user.role==='teacher'?[['students','♙','学生管理'],['access','♧','注册与邀请码']]:[])]:course?[[activeCourse==='design'?'design':'placeholder','▤','课程首页']]:[])];
+ if(course){
+  if(user.role==='teacher'&&!items.some(x=>x[0]==='students'))items.push(['students','♙','学生管理']);
+  if(user.role==='teacher'&&!items.some(x=>x[0]==='access'))items.push(['access','♧','注册与邀请码']);
+  items.push(['messages','☏','学生留言']);
+ }
  $('#nav').innerHTML=items.map(([id,icon,name])=>`<button data-page="${id}">${icon}　${name}</button>`).join('');
  $('#nav').onclick=e=>{const b=e.target.closest('[data-page]');if(b){if(b.dataset.page==='portal')selectCourse(null);else show(b.dataset.page)}};
  $('#courseSelector').value=activeCourse||'';

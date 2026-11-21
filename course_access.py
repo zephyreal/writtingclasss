@@ -4,8 +4,8 @@ import json
 import re
 import secrets
 import time
-from fastapi import Depends,HTTPException
-from pydantic import BaseModel,Field
+from fastapi import Depends,HTTPException,Query
+from pydantic import BaseModel,Field,StrictInt
 
 COURSE_IDS=('writing','english','equipment','design')
 TITLES=dict(zip(COURSE_IDS,('学术论文写作','机械工程专业英语','智能装备基础','智能制造课程设计')))
@@ -26,6 +26,11 @@ def migrate(c,stamp):
         ppt_topic TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,course_id))''')
     membership_columns={r['name'] for r in c.execute('PRAGMA table_info(course_memberships)')}
     if 'active' not in membership_columns:c.execute('ALTER TABLE course_memberships ADD COLUMN active INTEGER NOT NULL DEFAULT 1')
+    c.execute("""CREATE TABLE IF NOT EXISTS course_messages(
+        id INTEGER PRIMARY KEY,course_id TEXT NOT NULL,user_id INTEGER NOT NULL REFERENCES users(id),
+        parent_id INTEGER REFERENCES course_messages(id),body TEXT NOT NULL,created TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0)""")
+    c.execute('CREATE INDEX IF NOT EXISTS course_messages_list ON course_messages(course_id,parent_id,deleted,id)')
     c.execute('CREATE TABLE IF NOT EXISTS account_migrations(version TEXT PRIMARY KEY,created TEXT NOT NULL)')
     if not c.execute("SELECT 1 FROM account_migrations WHERE version='course-access-v1'").fetchone():
         for u in c.execute("SELECT id FROM users WHERE role='student' AND deleted_at=''").fetchall():
@@ -60,6 +65,13 @@ def gated_course(path):
     if any(path==p or path.startswith(p+'/') for p in ('/api/chapters','/api/materials','/api/progress','/api/practice','/api/profile','/api/assignments','/api/submissions','/api/writing')):return 'writing'
     return None
 
+class BatchGrant(BaseModel):
+    student_ids:list[StrictInt]=Field(min_length=1,max_length=500)
+    courses:list[str]=Field(min_length=1,max_length=4)
+class Message(BaseModel):
+    body:str=Field(min_length=1,max_length=2000)
+    parent_id:StrictInt|None=None
+
 class Join(BaseModel):invite_code:str=Field(min_length=1,max_length=100)
 class Phone(BaseModel):phone:str=Field(min_length=7,max_length=30)
 class Memberships(BaseModel):courses:list[str]=Field(max_length=4)
@@ -73,6 +85,73 @@ class Removal(BaseModel):
 
 def register(app,env):
     db=lambda:env['db']();current=env['current'];teacher=env['teacher']
+    @app.post('/api/teacher/students/batch-courses')
+    def grant_many(x:BatchGrant,u=Depends(teacher)):
+        ids=set(x.student_ids);courses=set(x.courses)
+        if any(uid<=0 for uid in ids) or any(cid not in COURSE_IDS for cid in courses):
+            raise HTTPException(400,'请选择有效学生和课程')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            marks=','.join('?' for _ in ids)
+            found={r[0] for r in c.execute(f"SELECT id FROM users WHERE id IN ({marks}) AND role='student' AND deleted_at=''",tuple(ids))}
+            if found!=ids:raise HTTPException(409,'部分学生账号已变更，请刷新列表后重新选择；本次未修改权限')
+            added=0
+            for uid in sorted(ids):
+                for cid in sorted(courses):
+                    if c.execute('SELECT 1 FROM course_memberships WHERE user_id=? AND course_id=? AND active=1',(uid,cid)).fetchone():continue
+                    c.execute('INSERT INTO course_memberships(user_id,course_id,joined,origin) VALUES(?,?,?,?) ON CONFLICT(user_id,course_id) DO UPDATE SET active=1,joined=excluded.joined,origin=excluded.origin',(uid,cid,env['now'](),'教师批量授权'))
+                    added+=1
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'batch-course-grant',json.dumps({'students':sorted(ids),'courses':sorted(courses),'added':added}),env['now']()))
+        return {'ok':True,'students':len(ids),'added':added}
+
+    def board_access(c,u,cid):
+        if cid not in COURSE_IDS:raise HTTPException(404,'课程不存在')
+        require_course(c,u,cid)
+
+    def message_row(r,u):
+        return {'id':r['id'],'parent_id':r['parent_id'],'body':r['body'],'created':r['created'],
+                'author':r['name'] if not r['deleted_at'] else '已注销用户',
+                'teacher':r['role']=='teacher','can_delete':u['role']=='teacher' or r['user_id']==u['id']}
+
+    @app.get('/api/courses/{cid}/messages')
+    def messages(cid:str,before:int=Query(default=0,ge=0),parent_id:int|None=Query(default=None,gt=0),u=Depends(current)):
+        with db() as c:
+            board_access(c,u,cid)
+            parent=None
+            if parent_id is not None:
+                parent=c.execute('SELECT m.*,u.name,u.role,u.deleted_at FROM course_messages m JOIN users u ON u.id=m.user_id WHERE m.id=? AND m.course_id=? AND m.parent_id IS NULL AND m.deleted=0',(parent_id,cid)).fetchone()
+                if not parent:raise HTTPException(404,'留言不存在或已删除')
+            rows=c.execute('SELECT m.*,u.name,u.role,u.deleted_at FROM course_messages m JOIN users u ON u.id=m.user_id WHERE m.course_id=? AND m.parent_id IS ? AND m.deleted=0 AND (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT 31',(cid,parent_id,before,before)).fetchall()
+            items=[]
+            for r in rows[:30]:
+                item=message_row(r,u)
+                item['replies']=c.execute('SELECT COUNT(*) FROM course_messages WHERE parent_id=? AND deleted=0',(r['id'],)).fetchone()[0] if parent_id is None else 0
+                items.append(item)
+            return {'items':items,'next':rows[29]['id'] if len(rows)>30 else None,'parent':message_row(parent,u) if parent else None}
+
+    @app.post('/api/courses/{cid}/messages')
+    def post_message(cid:str,x:Message,u=Depends(current)):
+        body=x.body.strip()
+        if not body:raise HTTPException(400,'请输入留言内容')
+        env['throttle']('course-message:'+str(u['id']),60,3600)
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE');board_access(c,u,cid)
+            if x.parent_id is not None and not c.execute('SELECT 1 FROM course_messages WHERE id=? AND course_id=? AND parent_id IS NULL AND deleted=0',(x.parent_id,cid)).fetchone():
+                raise HTTPException(404,'原留言不存在或已删除')
+            mid=c.execute('INSERT INTO course_messages(course_id,user_id,parent_id,body,created) VALUES(?,?,?,?,?)',(cid,u['id'],x.parent_id,body,env['now']())).lastrowid
+        return {'ok':True,'id':mid}
+
+    @app.delete('/api/courses/{cid}/messages/{mid}')
+    def delete_message(cid:str,mid:int,u=Depends(current)):
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE');board_access(c,u,cid)
+            row=c.execute('SELECT * FROM course_messages WHERE id=? AND course_id=? AND deleted=0',(mid,cid)).fetchone()
+            if not row:raise HTTPException(404,'留言不存在或已删除')
+            if u['role']!='teacher' and row['user_id']!=u['id']:raise HTTPException(403,'只能删除自己的留言')
+            c.execute('UPDATE course_messages SET deleted=1 WHERE id=? OR parent_id=?',(mid,mid))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'course-message-delete',str(mid),env['now']()))
+        return {'ok':True}
+
     @app.post('/api/courses/join')
     def join(x:Join,u=Depends(current)):
         env['throttle']('course-join:'+str(u['id']),30,3600)
