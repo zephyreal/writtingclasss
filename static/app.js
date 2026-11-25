@@ -1,5 +1,6 @@
 'use strict';
 const $=s=>document.querySelector(s), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let guestMode=false;
 let user, page='portal', reg=false, currentQ, aiQuestion=false, selectedChapter=0, renderVersion=0, activeCourse=null;
 function toast(s){$('#toast').textContent=s;$('#toast').style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>$('#toast').style.display='none',5500)}
 async function api(path,method='GET',data,signal){const actor=user,options={method,signal,credentials:'same-origin',headers:{'X-App-Request':'1'}};if(data instanceof FormData) options.body=data;else if(data!==undefined){options.body=JSON.stringify(data);options.headers['Content-Type']='application/json'}const r=await fetch('/api'+path,options);if(!r.ok){let e;try{e=await r.json()}catch{e={detail:'请求失败：HTTP '+r.status}}if(r.status===401&&user&&user===actor){if(typeof englishCleanup==='function')englishCleanup();user=null;$('#workspace').hidden=true;$('#auth').hidden=false}throw Error(Array.isArray(e.detail)?'请检查输入格式和长度':e.detail||'请求失败')}return r.json()}
@@ -36,6 +37,7 @@ const COURSES=[
  {id:'design',title:'智能制造课程设计',subtitle:'Intelligent Manufacturing Design',icon:'◉',label:'实践案例已开放',description:'通过AI五子棋交互案例，探索智能决策与工程实践。',state:'open'}
 ];
 function renderNavigation(){
+ if(guestMode)return renderGuestNavigation();
  const writingItems=user.role==='teacher'?[...menu,['writingWorklist','▦','班级交付清单'],['students','♙','学生管理'],['review','✓','作业批改'],['access','♧','注册与额度'],['settings','⚙','AI 接口设置'],['usage','▦','AI 用量记录']]:menu;
  const course=COURSES.find(c=>c.id===activeCourse);
  const englishItems=[['english','◉','话题对话'],['englishHistory','▤','记录与成绩'],['englishProfile','◎','英语画像'],...(user.role==='teacher'?[['englishReview','✓','口语评价与成绩'],['englishStudents','♙','英语练习档案'],['englishSettings','⚙','实时语音设置']]:[])];
@@ -53,6 +55,7 @@ function renderNavigation(){
  $('#sideCaption').textContent=course?.title||'四门课程 · 一个学习空间';
 }
 async function selectCourse(id,target){
+ if(guestMode)return selectGuestCourse(id,target);
  if(id&&user?.role!=='teacher'&&Array.isArray(user?.courses)&&!user.courses.includes(id)){if(typeof openJoinCourse==='function')openJoinCourse(id);return}
  activeCourse=COURSES.some(c=>c.id===id)?id:null;
  renderNavigation();
@@ -61,13 +64,14 @@ async function selectCourse(id,target){
 }
 async function boot(){
  try{user=await api('/me')}catch{return}
+ if(guestMode){guestMode=false;$('#passwordBtn').hidden=false;$('#logout').textContent='↗';$('#logout').title='退出'}
  $('#auth').hidden=true;$('#workspace').hidden=false;$('#httpNotice').hidden=user.secure;
  $('#userName').textContent=user.name;$('#userRole').textContent=user.role==='teacher'?'课程教师':user.student_no;$('#avatar').textContent=user.name.slice(-1);
  const requested=typeof location!=='undefined'?location.hash.replace('#',''):null;
  await selectCourse(COURSES.some(c=>c.id===requested)?requested:null);
 }
 function heading(title,desc,extra=''){return `<div class="page-heading"><div><h2>${title}</h2><p>${desc}</p></div>${extra}</div>`}
-async function show(id){if(typeof englishCleanup==='function')englishCleanup();page=id;const version=++renderVersion;$('#nav').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));const navItem=$('#nav [data-page="'+id+'"]');const title=navItem?navItem.textContent.trim().slice(1).trim():'课程首页';$('#breadcrumb').textContent=(activeCourse?COURSES.find(c=>c.id===activeCourse).title+' / ':'')+title;$('#content').innerHTML='<div class="loading">正在整理你的学习空间…</div>';try{let result=await views[id]();if(version!==renderVersion)return;$('#content').innerHTML=result.html;result.bind?.()}catch(e){if(version===renderVersion)$('#content').innerHTML=`<div class="empty">${esc(e.message)}<br><button id="retry">重试</button></div>`;$('#retry')?.addEventListener('click',()=>show(id))}}
+async function show(id){if(guestMode)return showGuestPage(id);if(typeof englishCleanup==='function')englishCleanup();page=id;const version=++renderVersion;$('#nav').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));const navItem=$('#nav [data-page="'+id+'"]');const title=navItem?navItem.textContent.trim().slice(1).trim():'课程首页';$('#breadcrumb').textContent=(activeCourse?COURSES.find(c=>c.id===activeCourse).title+' / ':'')+title;$('#content').innerHTML='<div class="loading">正在整理你的学习空间…</div>';try{let result=await views[id]();if(version!==renderVersion)return;$('#content').innerHTML=result.html;result.bind?.()}catch(e){if(version===renderVersion)$('#content').innerHTML=`<div class="empty">${esc(e.message)}<br><button id="retry">重试</button></div>`;$('#retry')?.addEventListener('click',()=>show(id))}}
 const views={};
 views.portal=async()=>{
  const courses=await api('/courses');
