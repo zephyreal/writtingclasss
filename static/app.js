@@ -10,6 +10,7 @@ let loginRole='student';
 function renderAuth(){
  const registering=reg&&loginRole==='student';reg=registering;
  for(const id of ['nameLabel','phoneLabel','inviteLabel']){const label=$('#'+id);label.hidden=!registering;label.querySelector('input').required=registering}
+ if($('#forgotPassword'))$('#forgotPassword').hidden=registering||loginRole==='teacher';
  $('#registerNote').hidden=!registering;$('#authToggle').hidden=loginRole==='teacher';
  $('#authTitle').textContent=registering?'创建学生账号':loginRole==='teacher'?'教师登录':'学生登录';
  $('#authDesc').textContent=registering?'填写资料与对应课程的邀请码，注册后登录。已有账号可直接登录后加入新课程。':loginRole==='teacher'?'使用教师账号管理课程、学生和竞赛。':'使用学号登录，进入已加入的课程。';

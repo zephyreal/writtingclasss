@@ -21,6 +21,10 @@ def migrate(c):
     CREATE INDEX IF NOT EXISTS practice_runs_user ON practice_runs(user_id,id);
     CREATE TABLE IF NOT EXISTS practice_generation(user_id INTEGER PRIMARY KEY REFERENCES users(id),generation INTEGER NOT NULL DEFAULT 0);
     ''')
+    if 'seconds' not in {r['name'] for r in c.execute('PRAGMA table_info(practice_pending)')}:
+        c.execute('ALTER TABLE practice_pending ADD COLUMN seconds INTEGER NOT NULL DEFAULT 10')
+    c.execute('CREATE TABLE IF NOT EXISTS practice_settings(id INTEGER PRIMARY KEY CHECK(id=1),seconds INTEGER NOT NULL DEFAULT 10)')
+    c.execute('INSERT OR IGNORE INTO practice_settings(id) VALUES(1)')
     # Unfinished legacy sessions are not learning records and must not cross curricula.
     for row in c.execute('SELECT token,items FROM practice_pending').fetchall():
         items=json.loads(row['items'])
@@ -81,7 +85,8 @@ def choose(c,uid):
         RNG.shuffle(picked)
     snapshots=[]
     for q in picked:
-        item=dict(q);item['bank_version']=BANK_VERSION;order=list(range(len(q['options'])));RNG.shuffle(order)
+        item=dict(q);item['bank_version']=BANK_VERSION;order=list(range(len(q['options'])))
+        if q['kind']!='boolean':RNG.shuffle(order)
         item['options']=[q['options'][i] for i in order];item['answer']=order.index(q['answer']);snapshots.append(item)
     return snapshots,source
 
@@ -96,7 +101,7 @@ def result(row):
 
 def public_pending(row):
     q=json.loads(row['items'])[row['position']]
-    return {'token':row['token'],'position':row['position'],'total':SIZE,'seconds':SECONDS,'deadline':row['deadline'],'server_now':clock(),'question':{k:q[k] for k in ('id','chapter_id','chapter_title','stem','options','kind')},'source':row['source']}
+    return {'token':row['token'],'position':row['position'],'total':SIZE,'seconds':row['seconds'],'deadline':row['deadline'],'server_now':clock(),'question':{k:q[k] for k in ('id','chapter_id','chapter_title','stem','options','kind')},'source':row['source']}
 
 def overview(c,uid):
     row=c.execute('SELECT COUNT(*) n,SUM(correct) correct,SUM(timeouts) timeouts FROM practice_runs WHERE user_id=?',(uid,)).fetchone()
@@ -116,6 +121,9 @@ def unit_profile(c,uid):
 class Step(BaseModel):
     position:StrictInt=Field(ge=0,lt=SIZE)
     choice:StrictInt|None=Field(default=None,ge=0,le=2)
+class Timing(BaseModel):
+    seconds:StrictInt=Field(ge=5,le=300)
+
 class Management(BaseModel):
     reason:str=Field(min_length=2,max_length=300)
 
@@ -140,13 +148,24 @@ def register(app,env):
         except Exception:
             logging.getLogger(__name__).info('Practice planner unavailable; using recorded-answer recommendations for run %s',rid)
 
+    @app.get('/api/teacher/practice/settings')
+    def settings(u=Depends(teacher)):
+        with db() as c:return dict(c.execute('SELECT seconds FROM practice_settings WHERE id=1').fetchone())
+
+    @app.put('/api/teacher/practice/settings')
+    def save_settings(x:Timing,u=Depends(teacher)):
+        with db() as c:
+            c.execute('UPDATE practice_settings SET seconds=? WHERE id=1',(x.seconds,))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'practice-timing',str(x.seconds),env['now']()))
+        return {'seconds':x.seconds}
+
     @app.get('/api/practice/session')
     def state(u=Depends(current)):
         with db() as c:
             c.execute('DELETE FROM practice_pending WHERE expires<?',(clock(),))
             p=c.execute('SELECT * FROM practice_pending WHERE user_id=?',(u['id'],)).fetchone()
             runs=[summary(r) for r in c.execute('SELECT * FROM practice_runs WHERE user_id=? ORDER BY id DESC LIMIT 20',(u['id'],))]
-            return {'active':public_pending(p) if p else None,'records':runs,'summary':overview(c,u['id']),'bank_count':len(BANK),'unit_count':8,'per_unit':80}
+            return {'active':public_pending(p) if p else None,'records':runs,'summary':overview(c,u['id']),'seconds':c.execute('SELECT seconds FROM practice_settings WHERE id=1').fetchone()[0],'bank_count':len(BANK),'unit_count':8,'per_unit':80}
 
     @app.post('/api/practice/session')
     def start(u=Depends(current)):
@@ -156,7 +175,8 @@ def register(app,env):
             p=c.execute('SELECT * FROM practice_pending WHERE user_id=?',(u['id'],)).fetchone()
             if p:return public_pending(p)
             items,source=choose(c,u['id']);stamp=clock();token=secrets.token_urlsafe(24)
-            c.execute('INSERT INTO practice_pending VALUES(?,?,?,?,?,?,?,?,?)',(token,u['id'],stamp,stamp+1200,0,stamp+SECONDS,json.dumps(items,ensure_ascii=False),'[]',source))
+            seconds=c.execute('SELECT seconds FROM practice_settings WHERE id=1').fetchone()[0]
+            c.execute('INSERT INTO practice_pending(token,user_id,created,expires,position,deadline,items,answers,source,seconds) VALUES(?,?,?,?,?,?,?,?,?,?)',(token,u['id'],stamp,stamp+max(1200,SIZE*seconds+600),0,stamp+seconds,json.dumps(items,ensure_ascii=False),'[]',source,seconds))
             c.execute('INSERT OR IGNORE INTO practice_generation(user_id) VALUES(?)',(u['id'],))
             return public_pending(c.execute('SELECT * FROM practice_pending WHERE token=?',(token,)).fetchone())
 
@@ -175,10 +195,10 @@ def register(app,env):
             stamp=clock();timed_out=stamp>=p['deadline']
             if x.choice is None and not timed_out:raise HTTPException(409,'当前题目尚未到时')
             choice=None if timed_out else x.choice
-            q.update(choice=choice,timed_out=timed_out,correct=choice==q['answer'],elapsed=round(min(SECONDS,max(0,stamp-(p['deadline']-SECONDS))),3))
+            q.update(choice=choice,timed_out=timed_out,correct=choice==q['answer'],elapsed=round(min(p['seconds'],max(0,stamp-(p['deadline']-p['seconds']))),3))
             answers=json.loads(p['answers']);answers.append(q)
             if len(answers)<SIZE:
-                c.execute('UPDATE practice_pending SET position=position+1,deadline=?,answers=? WHERE token=?',(stamp+SECONDS,json.dumps(answers,ensure_ascii=False),token))
+                c.execute('UPDATE practice_pending SET position=position+1,deadline=?,answers=? WHERE token=?',(stamp+p['seconds'],json.dumps(answers,ensure_ascii=False),token))
                 return {'finished':False,'active':public_pending(c.execute('SELECT * FROM practice_pending WHERE token=?',(token,)).fetchone())}
             rid=c.execute('INSERT INTO practice_runs(token,user_id,started,completed,source,correct,timeouts,items,bank_version) VALUES(?,?,?,?,?,?,?,?,?)',(token,u['id'],p['created'],stamp,p['source'],sum(q['correct'] for q in answers),sum(q['timed_out'] for q in answers),json.dumps(answers,ensure_ascii=False),answers[0].get('bank_version',BANK_VERSION))).lastrowid
             c.execute('DELETE FROM practice_pending WHERE token=?',(token,))

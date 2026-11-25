@@ -1,10 +1,11 @@
 """Course enrolment, contact details and reversible student account removal."""
+import hmac
 import hashlib
 import json
 import re
 import secrets
 import time
-from fastapi import Depends,HTTPException,Query
+from fastapi import Depends,HTTPException,Query,Request
 from pydantic import BaseModel,Field,StrictInt
 
 COURSE_IDS=('writing','english','equipment','design')
@@ -31,6 +32,7 @@ def migrate(c,stamp):
         parent_id INTEGER REFERENCES course_messages(id),body TEXT NOT NULL,created TEXT NOT NULL,
         deleted INTEGER NOT NULL DEFAULT 0)""")
     c.execute('CREATE INDEX IF NOT EXISTS course_messages_list ON course_messages(course_id,parent_id,deleted,id)')
+    c.execute('''CREATE TABLE IF NOT EXISTS password_recovery(user_id INTEGER PRIMARY KEY REFERENCES users(id),requested REAL NOT NULL,expires REAL NOT NULL,code_hash TEXT NOT NULL DEFAULT '',password_version TEXT NOT NULL,phone TEXT NOT NULL)''')
     c.execute('CREATE TABLE IF NOT EXISTS account_migrations(version TEXT PRIMARY KEY,created TEXT NOT NULL)')
     if not c.execute("SELECT 1 FROM account_migrations WHERE version='course-access-v1'").fetchone():
         for u in c.execute("SELECT id FROM users WHERE role='student' AND deleted_at=''").fetchall():
@@ -71,6 +73,15 @@ class BatchGrant(BaseModel):
 class Message(BaseModel):
     body:str=Field(min_length=1,max_length=2000)
     parent_id:StrictInt|None=None
+
+class RecoveryIdentity(BaseModel):
+    student_no:str=Field(min_length=1,max_length=30)
+    phone:str=Field(min_length=7,max_length=30)
+class RecoveryReset(RecoveryIdentity):
+    code:str=Field(min_length=1,max_length=64)
+    password:str=Field(min_length=10,max_length=128)
+class RecoveryApproval(BaseModel):
+    verified:bool
 
 class Join(BaseModel):invite_code:str=Field(min_length=1,max_length=100)
 class Phone(BaseModel):phone:str=Field(min_length=7,max_length=30)
@@ -214,3 +225,66 @@ def register(app,env):
             c.execute("UPDATE users SET archived_student_no=student_no,student_no=?,deleted_at=? WHERE id=?",('deleted-'+str(uid)+'-'+secrets.token_hex(6),env['now'](),uid))
             c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'student-delete',json.dumps({'student':uid,'student_no':x.student_no,'reason':x.reason.strip()},ensure_ascii=False),env['now']()))
         return {'ok':True,'archived':True}
+
+
+    def recovery_limit(request,no,action):
+        env['throttle']('recovery-ip:'+action+':'+request.client.host,60,3600)
+        env['throttle']('recovery-account:'+action+':'+hashlib.sha256(no.encode()).hexdigest(),5,3600)
+
+    @app.post('/api/password-recovery/request')
+    def recovery_request(x:RecoveryIdentity,request:Request):
+        no=x.student_no.strip();phone=phone_value(x.phone)
+        recovery_limit(request,no,'request')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            u=c.execute("SELECT * FROM users WHERE student_no=? AND phone=? AND role='student' AND deleted_at=''",(no,phone)).fetchone()
+            if u:
+                # Repeated public requests never invalidate a still-valid issued code.
+                c.execute("DELETE FROM password_recovery WHERE user_id=? AND (expires<? OR password_version<>? OR phone<>?)",(u['id'],time.time(),u['password'],phone))
+                c.execute('INSERT OR IGNORE INTO password_recovery(user_id,requested,expires,password_version,phone) VALUES(?,?,?,?,?)',(u['id'],time.time(),time.time()+7*86400,u['password'],phone))
+        return {'ok':True,'message':'如学号和电话与登记资料一致，申请已提交。请联系教师核实身份并领取重置码；未登记或更换电话请直接联系教师。'}
+
+    @app.get('/api/teacher/password-recovery')
+    def recovery_list(u=Depends(teacher)):
+        with db() as c:
+            return [dict(r) for r in c.execute("""SELECT u.id,u.name,u.student_no,u.phone,r.requested,r.expires,(r.code_hash<>'') AS issued
+                FROM password_recovery r JOIN users u ON u.id=r.user_id
+                WHERE u.role='student' AND u.deleted_at='' AND r.expires>? AND r.password_version=u.password AND r.phone=u.phone ORDER BY r.requested DESC""",(time.time(),))]
+
+    @app.post('/api/teacher/password-recovery/{uid}/approve')
+    def recovery_approve(uid:int,x:RecoveryApproval,u=Depends(teacher)):
+        if not x.verified:raise HTTPException(400,'请先通过登记电话或当面核实学生身份')
+        code=secrets.token_hex(6).upper();expires=time.time()+1800
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("""SELECT r.user_id FROM password_recovery r JOIN users u ON u.id=r.user_id
+                WHERE u.id=? AND u.role='student' AND u.deleted_at='' AND r.expires>? AND r.password_version=u.password AND r.phone=u.phone""",(uid,time.time())).fetchone()
+            if not row:raise HTTPException(404,'申请已过期或账号资料已变更，请学生重新申请')
+            c.execute('UPDATE password_recovery SET code_hash=?,expires=? WHERE user_id=?',(hashlib.sha256(code.encode()).hexdigest(),expires,uid))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'recovery-approve',str(uid),env['now']()))
+        return {'code':code,'expires':expires}
+
+    @app.delete('/api/teacher/password-recovery/{uid}')
+    def recovery_dismiss(uid:int,u=Depends(teacher)):
+        with db() as c:
+            c.execute('DELETE FROM password_recovery WHERE user_id=?',(uid,))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(u['id'],'recovery-dismiss',str(uid),env['now']()))
+        return {'ok':True}
+
+    @app.post('/api/password-recovery/reset')
+    def recovery_reset(x:RecoveryReset,request:Request):
+        no=x.student_no.strip();phone=phone_value(x.phone)
+        recovery_limit(request,no,'reset')
+        digest=hashlib.sha256(x.code.strip().upper().encode()).hexdigest()
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            r=c.execute("""SELECT r.* FROM password_recovery r JOIN users u ON u.id=r.user_id
+                WHERE u.student_no=? AND u.phone=? AND u.role='student' AND u.deleted_at=''
+                AND r.expires>? AND r.password_version=u.password AND r.phone=u.phone""",(no,phone,time.time())).fetchone()
+            if not r or not hmac.compare_digest(r['code_hash'],digest):raise HTTPException(400,'资料或重置码无效、已使用或已过期，请核对或联系教师')
+            uid=r['user_id']
+            c.execute('UPDATE users SET password=? WHERE id=?',(env['pwdhash'](x.password),uid))
+            c.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
+            c.execute('DELETE FROM password_recovery WHERE user_id=?',(uid,))
+            c.execute('INSERT INTO audit(user_id,action,target,created) VALUES(?,?,?,?)',(uid,'password-recovered',str(uid),env['now']()))
+        return {'ok':True}

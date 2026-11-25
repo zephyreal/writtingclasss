@@ -275,3 +275,50 @@ def test_new_round_uses_ppt_chapter_titles_and_current_statistics(context):
     assert s.get('/api/practice/session').json()['summary']['current_rounds']==1
     units=s.get('/api/profile').json()['timed_practice_units']
     assert sum(x['questions'] for x in units)==30 and sum(x['correct'] for x in units)==30
+
+
+def test_teacher_timing_snapshot_and_timeout(context):
+    t,s,other,timer=context
+    assert t.get('/api/teacher/practice/settings').json()=={'seconds':10}
+    assert s.put('/api/teacher/practice/settings',json={'seconds':60}).status_code==403
+    for seconds in [4,301,10.5,True,'30']:
+        assert t.put('/api/teacher/practice/settings',json={'seconds':seconds}).status_code==422
+    active=start(s)
+    assert t.put('/api/teacher/practice/settings',json={'seconds':60}).status_code==200
+    assert s.get('/api/practice/session').json()['seconds']==60
+    assert start(s)['seconds']==10
+    other_active=start(other)
+    assert other_active['seconds']==60 and other_active['deadline']==timer[0]+60
+    timer[0]+=11
+    r=other.post('/api/practice/session/'+other_active['token']+'/answer',json={'position':0,'choice':correct_choice(other_active)}).json()
+    assert r['active']['deadline']==timer[0]+60
+    with a.db() as c:
+        q=json.loads(c.execute('SELECT answers FROM practice_pending WHERE user_id=?',(other.get('/api/me').json()['id'],)).fetchone()[0])[0]
+        assert q['correct'] and not q['timed_out'] and q['elapsed']==11
+    r=s.post('/api/practice/session/'+active['token']+'/answer',json={'position':0,'choice':0}).json()
+    assert r['active']['seconds']==10 and r['active']['deadline']==timer[0]+10
+    a.init()  # saved setting survives migrations/restart
+    assert t.get('/api/teacher/practice/settings').json()['seconds']==60
+
+
+def test_boolean_order_and_answer_mapping(context):
+    t,s,other,timer=context
+    with a.db() as c:
+        for _ in range(10):
+            items,_=p.choose(c,s.get('/api/me').json()['id'])
+            for q in items:
+                original=BANK[q['id']]
+                assert q['options'][q['answer']]==original['options'][original['answer']]
+                if q['kind']=='boolean':assert q['options']==['正确','错误']
+
+
+def test_long_round_does_not_expire_after_twenty_minutes(context):
+    t,s,other,timer=context
+    t.put('/api/teacher/practice/settings',json={'seconds':300})
+    active=start(s)
+    for i in range(30):
+        timer[0]+=299
+        r=s.post('/api/practice/session/'+active['token']+'/answer',json={'position':i,'choice':correct_choice(active)})
+        assert r.status_code==200,r.text
+        if i<29:active=r.json()['active']
+    assert r.json()['result']['correct']==30
